@@ -3,17 +3,11 @@ from urllib.parse import unquote
 
 no_cache = 1
 
-
 def get_context(context):
 	"""
 	Handles hierarchical product routes.
-	- /category/sub-category -> Item Group page
-	- /category/sub-category/item-code -> Item page
 	"""
 	path = unquote(frappe.request.path).strip("/")
-
-	# The route rule sends everything here, so we need to determine
-	# if the path points to an Item Group, an Item, or something else.
 
 	# 1. Check if the entire path maps to an Item Group's custom_route
 	item_group = frappe.db.get_value(
@@ -25,57 +19,50 @@ def get_context(context):
 	if item_group:
 		return _get_item_group_context(context, item_group)
 
-	# 2. If not a group, it could be an item within a group.
-	# The item code would be the last part of the path.
+	# 2. Check if it's an Item (Template or Variant) via custom_route
+	item_route = frappe.db.get_value("Item", {"custom_route": path}, "name")
+	if item_route:
+		item_doc = frappe.get_doc("Item", item_route)
+		return _get_item_context(context, item_doc, path)
+
+	# 3. Fallback: check based on item code at end of url
 	path_parts = path.split("/")
 	item_code = path_parts[-1]
 	
-	# The path to the group would be everything except the last part.
-	item_group_path = "/".join(path_parts[:-1])
-
-	if item_group_path:
-		parent_item_group = frappe.db.get_value(
-			"Item Group",
-			{"custom_route": item_group_path},
-			["name"],
-			as_dict=True,
-		)
-		if parent_item_group:
-			# We have a parent group, now let's see if the item exists within it
-			item = frappe.db.get_value("Item", {"item_code": item_code, "item_group": parent_item_group.name}, "name")
-			if item:
-				item_doc = frappe.get_doc("Item", item)
-				return _get_item_context(context, item_doc, path)
-
-	# 3. Fallback: Check if the path (or last part of it) is a direct match for an item code.
-	# This handles items that might not be in a routed group.
-	try:
-		# First try full path as item code, for very custom/short URLs
-		item_doc = frappe.get_doc("Item", path)
+	if frappe.db.exists("Item", item_code):
+		item_doc = frappe.get_doc("Item", item_code)
 		return _get_item_context(context, item_doc, path)
-	except frappe.DoesNotExistError:
-		try:
-			# Then try last part of the path as item code
-			item_doc = frappe.get_doc("Item", item_code)
-			return _get_item_context(context, item_doc, path)
-		except frappe.DoesNotExistError:
-			pass # Not an item, will lead to 404.
 
-	# 4. Nothing matched, so raise a 404
+	# 404 if nothing matches
 	raise frappe.PageNotFoundError(f"Product or Category not found: {path}")
 
 
 def _get_item_group_context(context, item_group):
 	"""Return context for item group listing page"""
-	# Get child items
-	child_items = frappe.get_all(
-		'Item',
-		filters={
-			'item_group': item_group['name'],
-		},
-		fields=['name', 'item_name', 'item_code', 'image', 'description'],
-		limit_page_length=999
+	
+	# Get Child Groups
+	child_item_groups = frappe.get_all(
+		"Item Group",
+		filters={"parent_item_group": item_group["name"], "custom_published_in_website": 1},
+		fields=["name", "item_group_name", "image", "custom_route", "description"],
+		order_by="idx"
 	)
+
+	child_items = []
+	if not child_item_groups:
+		# Show Templates (Series) OR Standalone items
+		# We exclude items that are variants of another item to keep the list clean
+		child_items = frappe.get_all(
+			'Item',
+			filters={
+				'item_group': item_group['name'],
+				'variant_of': ('is', 'not set'),
+				'disabled': 0,
+				'custom_published_in_website': 1
+			},
+			fields=['name', 'item_name', 'item_code', 'image', 'description', 'custom_route'],
+			limit_page_length=999
+		)
 	
 	# Build breadcrumbs
 	breadcrumbs = [{'label': 'Home', 'url': '/'}]
@@ -83,8 +70,6 @@ def _get_item_group_context(context, item_group):
 		ig_doc = frappe.get_doc('Item Group', item_group['name'])
 		parents = []
 		current = ig_doc
-		
-		# Get parent chain
 		while current.parent_item_group:
 			try:
 				parent = frappe.get_doc('Item Group', current.parent_item_group)
@@ -92,16 +77,12 @@ def _get_item_group_context(context, item_group):
 				current = parent
 			except:
 				break
-		
-		# Add all parents to breadcrumbs
 		for parent in parents:
 			custom_route = frappe.db.get_value('Item Group', parent.name, 'custom_route')
 			breadcrumbs.append({
 				'label': parent.item_group_name,
 				'url': f"/{custom_route}" if custom_route else f"/{parent.name}"
 			})
-		
-		# Add current item group
 		breadcrumbs.append({
 			'label': item_group['item_group_name'],
 			'url': f"/{item_group['custom_route']}"
@@ -109,13 +90,13 @@ def _get_item_group_context(context, item_group):
 	except Exception as e:
 		frappe.log_error(f"Error building breadcrumbs: {e}")
 	
-	# Update context with product data
 	context.update({
 		'item_group': item_group,
+		'child_item_groups': child_item_groups,
+		'items': child_items,
 		'item_group_name': item_group.get('item_group_name', ''),
 		'description': item_group.get('description', ''),
 		'image': item_group.get('image', ''),
-		'items': child_items,
 		'title': item_group.get('item_group_name', ''),
 		'breadcrumbs': breadcrumbs,
 		'template': 'rigpl_erpnext/templates/product_page.html',
@@ -128,14 +109,12 @@ def _get_item_context(context, item, path):
 	"""Return context for individual item page"""
 	breadcrumbs = [{'label': 'Home', 'url': '/'}]
 	
-	# Add item group breadcrumbs
+	# Breadcrumb Logic
 	try:
 		if item.item_group:
 			ig_doc = frappe.get_doc('Item Group', item.item_group)
 			parents = []
 			current = ig_doc
-			
-			# Get parent chain
 			while current.parent_item_group:
 				try:
 					parent = frappe.get_doc('Item Group', current.parent_item_group)
@@ -143,16 +122,12 @@ def _get_item_context(context, item, path):
 					current = parent
 				except:
 					break
-			
-			# Add all parents to breadcrumbs
 			for parent in parents:
 				custom_route = frappe.db.get_value('Item Group', parent.name, 'custom_route')
 				breadcrumbs.append({
 					'label': parent.item_group_name,
 					'url': f"/{custom_route}" if custom_route else f"/{parent.name}"
 				})
-			
-			# Add current item group
 			custom_route = frappe.db.get_value('Item Group', ig_doc.name, 'custom_route')
 			breadcrumbs.append({
 				'label': ig_doc.item_group_name,
@@ -161,7 +136,6 @@ def _get_item_context(context, item, path):
 	except:
 		pass
 	
-	# Add current item
 	breadcrumbs.append({
 		'label': item.item_name,
 		'url': f"/{path}"
@@ -169,47 +143,108 @@ def _get_item_context(context, item, path):
 
 	variants_data = []
 	attribute_headers = []
+	item_attributes = []
+	current_price_info = {}
+	current_stock_qty = 0
 
+	# --- CONDITION 1: IT IS A TEMPLATE / SERIES ---
+	# We show the "Item List" (Variants Table)
 	if item.has_variants:
-		# This item is a template. Fetch its variants.
+		
+		# Base Path for Links (Use current path as we are on the template page)
+		parent_path_base = path
+
 		variant_items = frappe.get_all(
 			"Item",
-			filters={"variant_of": item.name},
-			fields=["name", "item_name", "item_code"],
-			order_by="creation"
+			filters={"variant_of": item.name, "disabled": 0},
+			fields=["name", "item_name", "item_code", "description"],
+			order_by="idx asc, item_code asc"
 		)
 
 		if variant_items:
-			# Get all unique attribute names from the template's attributes table
-			template_attributes = frappe.get_all("Item Attribute", filters={"parent": item.name}, fields=["attribute"], order_by="idx")
-			attribute_headers = [d.attribute for d in template_attributes]
+			# Get Headers
+			attributes_meta = frappe.db.get_all("Item Variant Attribute", 
+				filters={"parent": item.name}, 
+				fields=["attribute"], 
+				order_by="idx"
+			)
+			attribute_headers = [d.attribute for d in attributes_meta]
 
 			for variant in variant_items:
-				variant_doc = frappe.get_doc("Item", variant.name)
-				attributes = {d.attribute: d.attribute_value for d in variant_doc.attributes}
+				# Fetch Attributes
+				var_attrs = frappe.db.get_all("Item Variant Attribute",
+					filters={"parent": variant.name},
+					fields=["attribute", "attribute_value"]
+				)
+				attr_map = {d.attribute: d.attribute_value for d in var_attrs}
+
+				# Fetch Price
+				price_info = frappe.db.get_value("Item Price", 
+					{"item_code": variant.name, "price_list": "Standard Selling"}, 
+					["price_list_rate", "uom", "currency"], 
+					as_dict=True
+				)
 				
-				price_info = frappe.db.get_value("Item Price", {"item_code": variant.name, "price_list": "Standard Selling"}, ["price_list_rate", "uom"], as_dict=True)
-				
-				# Simplified stock lookup
-				stock_qty = frappe.db.get_value("Bin", {"item_code": variant.name}, "sum(actual_qty)")
+				# Fetch Stock (Safe SQL)
+				stock_data = frappe.db.sql("""
+					SELECT SUM(actual_qty) FROM `tabBin` WHERE item_code = %s
+				""", (variant.name))
+				stock_qty = stock_data[0][0] if stock_data and stock_data[0][0] else 0
+
+				# Construct URL
+				variant_url = f"/{parent_path_base}/{variant.item_code}".replace("//", "/")
 
 				variants_data.append({
 					"name": variant.name,
-					"item_name": variant.item_name,
 					"item_code": variant.item_code,
-					"attributes": attributes,
+					"item_name": variant.item_name,
+					"attributes": attr_map,
 					"price": price_info.price_list_rate if price_info else 0,
-					"uom": price_info.uom if price_info else "",
-					"stock_qty": stock_qty or 0,
+					"currency": price_info.currency if price_info else "₹",
+					"uom": price_info.uom if price_info else "Nos",
+					"stock_qty": stock_qty,
+					"in_stock": stock_qty > 0,
+					"url": variant_url
 				})
+
+	# --- CONDITION 2: IT IS A SPECIFIC ITEM / VARIANT ---
+	# We show "Specifications" and "Single Cart" (No Table)
+	else:
+		# Fetch Attributes for the "Specifications" Table
+		item_attributes = frappe.get_all("Item Variant Attribute", 
+			filters={"parent": item.name},
+			fields=["attribute", "attribute_value"],
+			order_by="idx"
+		)
+
+		# Fetch Price
+		current_price_info = frappe.db.get_value("Item Price", 
+			{"item_code": item.name, "price_list": "Standard Selling"}, 
+			["price_list_rate", "currency", "uom"], 
+			as_dict=True
+		) or {}
+
+		# Fetch Stock (Safe SQL)
+		current_stock_data = frappe.db.sql("""
+			SELECT SUM(actual_qty) FROM `tabBin` WHERE item_code = %s
+		""", (item.name))
+		current_stock_qty = current_stock_data[0][0] if current_stock_data and current_stock_data[0][0] else 0
 
 	context.update({
 		'item': item,
 		'title': item.item_name,
 		'breadcrumbs': breadcrumbs,
 		'template': 'rigpl_erpnext/templates/item.html',
+		
+		# Template Page Data
 		'variants': variants_data,
-		'attribute_headers': attribute_headers
+		'attribute_headers': attribute_headers,
+		
+		# Specific Item Page Data
+		'item_attributes': item_attributes,
+		'current_price_info': current_price_info,
+		'current_stock_qty': current_stock_qty,
+		'in_stock': current_stock_qty > 0
 	})
 	
 	return context
