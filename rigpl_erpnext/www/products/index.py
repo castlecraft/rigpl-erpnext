@@ -166,12 +166,50 @@ def _get_item_context(context, item, path):
 		'label': item.item_name,
 		'url': f"/{path}"
 	})
-	
+
+	variants_data = []
+	attribute_headers = []
+
+	if item.has_variants:
+		# This item is a template. Fetch its variants.
+		variant_items = frappe.get_all(
+			"Item",
+			filters={"variant_of": item.name},
+			fields=["name", "item_name", "item_code"],
+			order_by="creation"
+		)
+
+		if variant_items:
+			# Get all unique attribute names from the template's attributes table
+			template_attributes = frappe.get_all("Item Attribute", filters={"parent": item.name}, fields=["attribute"], order_by="idx")
+			attribute_headers = [d.attribute for d in template_attributes]
+
+			for variant in variant_items:
+				variant_doc = frappe.get_doc("Item", variant.name)
+				attributes = {d.attribute: d.attribute_value for d in variant_doc.attributes}
+				
+				price_info = frappe.db.get_value("Item Price", {"item_code": variant.name, "price_list": "Standard Selling"}, ["price_list_rate", "uom"], as_dict=True)
+				
+				# Simplified stock lookup
+				stock_qty = frappe.db.get_value("Bin", {"item_code": variant.name}, "sum(actual_qty)")
+
+				variants_data.append({
+					"name": variant.name,
+					"item_name": variant.item_name,
+					"item_code": variant.item_code,
+					"attributes": attributes,
+					"price": price_info.price_list_rate if price_info else 0,
+					"uom": price_info.uom if price_info else "",
+					"stock_qty": stock_qty or 0,
+				})
+
 	context.update({
 		'item': item,
 		'title': item.item_name,
 		'breadcrumbs': breadcrumbs,
 		'template': 'rigpl_erpnext/templates/item.html',
+		'variants': variants_data,
+		'attribute_headers': attribute_headers
 	})
 	
 	return context
