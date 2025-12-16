@@ -150,28 +150,45 @@
 </div>
 
 <script>
-frappe.ready(function() {
-	// Handle Add to Cart
-	$('.page_content').on('click', '.item-variant-add-to-cart, .item-add-to-cart', function(e) {
-		const btn = $(this);
-		const item_code = btn.data('item-code');
-		
-		btn.prop('disabled', true);
-		
-		if (frappe.shopping_cart && frappe.shopping_cart.update_cart) {
-			frappe.shopping_cart.update_cart({
-				item_code: item_code,
-				qty: 1,
-				callback: function() { btn.prop('disabled', false); }
-			});
-		} else if (erpnext.shopping_cart && erpnext.shopping_cart.update_cart) {
-			erpnext.shopping_cart.update_cart({
-				item_code: item_code,
-				qty: 1,
-				callback: function() { btn.prop('disabled', false); }
+frappe.ready(function () {
+
+	$('.page_content').on(
+		'click',
+		'.item-add-to-cart, .item-variant-add-to-cart',
+		function (e) {
+			e.preventDefault();
+
+			if (frappe.session.user === "Guest") {
+				window.location.href = "/login?redirect-to=" + encodeURIComponent(window.location.pathname);
+				return;
+			}
+
+			const $btn = $(this);
+			const item_code = $btn.data('item-code');
+			if (!item_code) return;
+
+			$btn.prop('disabled', true);
+
+			frappe.call({
+				method: "webshop.webshop.shopping_cart.cart.update_cart",
+				args: {
+					item_code: item_code,
+					qty: 1
+				},
+				callback: function (r) {
+					$btn.prop('disabled', false);
+
+					if (!r.exc) {
+						frappe.show_alert({
+							message: __('Item added to cart'),
+							indicator: 'green'
+						});
+					}
+				}
 			});
 		}
-	});
+	);
+
 });
 </script>
 <style>
