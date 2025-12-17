@@ -179,11 +179,17 @@ def _get_item_context(context, item, path):
 				attr_map = {d.attribute: d.attribute_value for d in var_attrs}
 
 				# Fetch Price
-				price_info = frappe.db.get_value("Item Price", 
-					{"item_code": variant.name, "price_list": "Standard Selling"}, 
-					["price_list_rate", "uom", "currency"], 
+				price_info = frappe.db.get_value("Item Price",
+					{"item_code": variant.name, "price_list": "Standard Selling"},
+					["price_list_rate", "uom", "currency"],
 					as_dict=True
 				)
+				if not price_info:
+					price_info = frappe.db.get_value("Item Price",
+						{"item_code": variant.name, "selling": 1},
+						["price_list_rate", "uom", "currency"],
+						as_dict=True
+					)
 				
 				# Fetch Stock (Safe SQL)
 				stock_data = frappe.db.sql("""
@@ -218,11 +224,18 @@ def _get_item_context(context, item, path):
 		)
 
 		# Fetch Price
-		current_price_info = frappe.db.get_value("Item Price", 
-			{"item_code": item.name, "price_list": "Standard Selling"}, 
-			["price_list_rate", "currency", "uom"], 
+		current_price_info = frappe.db.get_value("Item Price",
+			{"item_code": item.name, "price_list": "Standard Selling"},
+			["price_list_rate", "currency", "uom"],
 			as_dict=True
-		) or {}
+		)
+		if not current_price_info:
+			current_price_info = frappe.db.get_value("Item Price",
+				{"item_code": item.name, "selling": 1},
+				["price_list_rate", "currency", "uom"],
+				as_dict=True
+			)
+		current_price_info = current_price_info or {}
 
 		# Fetch Stock (Safe SQL)
 		current_stock_data = frappe.db.sql("""
