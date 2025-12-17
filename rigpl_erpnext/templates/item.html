@@ -96,11 +96,17 @@
 		<h3 class="mb-3">Item List</h3>
 		<div class="table-responsive">
 			<table class="table table-bordered table-hover">
+				{% set desired_headers = [
+					('d1_mm', 'Flute Dia (mm)'), 
+					('l1_mm', 'Flute Length (mm)'), 
+					('d2_mm', 'Shank Dia (mm)'), 
+					('l2_mm', 'Overall Length (mm)')
+				] %}
 				<thead class="thead-light">
 					<tr>
 						<th>Item</th>
-						{% for header in attribute_headers %}
-						<th style="white-space: nowrap;">{{ header }}</th>
+						{% for _, header_text in desired_headers %}
+						<th style="white-space: nowrap;">{{ header_text }}</th>
 						{% endfor %}
 						<th>Price / Stock</th>
 						<th width="120">Action</th>
@@ -114,8 +120,8 @@
     					        <strong>{{ variant.item_code }}</strong>
     					    </a>
     					</td>
-						{% for header in attribute_headers %}
-						<td>{{ variant.attributes.get(header, '-') }}</td>
+						{% for attr_name, _ in desired_headers %}
+						<td>{{ variant.attributes.get(attr_name, '-') }}</td>
 						{% endfor %}
 						<td>
 							<div class="d-flex flex-column">
