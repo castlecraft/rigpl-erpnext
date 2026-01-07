@@ -150,7 +150,7 @@ doc_events = {
         "validate": "rigpl_erpnext.rigpl_erpnext.validations.expense_claim.validate"
     },
     "Holiday List": {
-        "validate": "rigpl_erpnext.hr_rigpl.validations.holiday_list.validate"
+        "validate": "rigpl_hrms_rigpl.validations.holiday_list.validate"
     },
     "Item": {
         "validate": "rigpl_erpnext.rigpl_erpnext.validations.item.validate",
@@ -168,14 +168,14 @@ doc_events = {
         "validate": "rigpl_erpnext.rigpl_erpnext.validations.lead.validate",
     },
     "Leave Allocation": {
-        "validate": "rigpl_erpnext.hr_rigpl.validations.leave_allocation.validate"
+        "validate": "rigpl_hrms_rigpl.validations.leave_allocation.validate"
     },
     "Leave Application": {
         "validate": "rigpl_erpnext.rigpl_erpnext.validations.leave_application.validate",
         "on_submit": "rigpl_erpnext.rigpl_erpnext.validations.leave_application.on_submit",
     },
     "Leave Policy": {
-        "validate": "rigpl_erpnext.hr_rigpl.validations.leave_policy.validate"
+        "validate": "rigpl_hrms_rigpl.validations.leave_policy.validate"
     },
     "Opportunity": {
         "validate": "rigpl_erpnext.rigpl_erpnext.validations.opportunity.validate"
