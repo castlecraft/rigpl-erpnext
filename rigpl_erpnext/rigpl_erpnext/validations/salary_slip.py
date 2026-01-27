@@ -569,11 +569,6 @@ def get_edc(doc):
     for d in existing_ded:
         doc.append("deductions", d)
 
-    # HRMS v16 automatically populates accrued_benefits for Salary Structure rows
-    # with accrual_component=1 (formerly handled via legacy is_contribution field).
-    # The migration patch v16_salary_component_migration.py has already converted
-    # all is_contribution=1 components to accrual_component=1, so HRMS handles this now.
-
 
 def get_from_sal_struct(doc, salary_structure_doc, table_list):
     data = SalarySlip.get_data_for_eval(doc)[0]
