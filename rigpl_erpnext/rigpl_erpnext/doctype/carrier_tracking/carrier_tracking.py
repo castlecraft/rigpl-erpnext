@@ -22,13 +22,15 @@ from rohit_common.utils.rohit_common_utils import get_email_id
 
 class CarrierTracking(WebsiteGenerator):
     allowed_docs_items = ['Sales Invoice', 'Purchase Order']
-
+    
+    @frappe.whitelist()
     def get_dtdc_pdf(self):
         dtdc_get_pdf(self.awb_number, self)
 
     def pushdata(self):
         pushOrderData(self)
 
+    @frappe.whitelist()
     def get_status(self):
         trans_doc = frappe.get_doc('Transporters', self.carrier_name)
         if trans_doc.fedex_credentials == 1 or trans_doc.dtdc_credentials == 1:
@@ -45,7 +47,8 @@ class CarrierTracking(WebsiteGenerator):
 
     def get_sign_proof(self):
         get_signature_proof(self)
-
+    
+    @frappe.whitelist()
     def address_validation(self):
         validate_address(self)
 
@@ -318,7 +321,8 @@ class CarrierTracking(WebsiteGenerator):
             pass
         else:
             frappe.throw("Shipment Package Details mandatory for Booking Shipment for {}".format(self.name))
-
+    
+    @frappe.whitelist()
     def available_services(self):
         trans_doc = frappe.get_doc("Transporters", self.carrier_name)
         if trans_doc.fedex_credentials == 1:
@@ -326,6 +330,7 @@ class CarrierTracking(WebsiteGenerator):
         elif trans_doc.dtdc_credentials == 1:
             dtdc_get_available_services(self)
 
+    @frappe.whitelist()
     def get_rates(self):
         tpt_doc = frappe.get_doc("Transporters", self.carrier_name)
         self.validate()
@@ -335,7 +340,7 @@ class CarrierTracking(WebsiteGenerator):
             self.save()
         else:
             get_rates_from_fedex(self)
-
+    @frappe.whitelist()
     def book_shipment(self):
         trans_doc = frappe.get_doc('Transporters', self.carrier_name)
         self.validate()
@@ -364,7 +369,7 @@ class CarrierTracking(WebsiteGenerator):
                         frappe.throw('Save the Transaction before Booking Shipment')
         else:
             frappe.throw("To Book Shipment, Package Details is Mandatory")
-
+    @frappe.whitelist()
     def delete_shipment(self):
         if self.status == "Booked":
             tpt_doc = frappe.get_doc("Transporters", self.carrier_name)
