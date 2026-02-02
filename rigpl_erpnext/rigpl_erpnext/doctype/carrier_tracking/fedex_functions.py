@@ -10,6 +10,8 @@ from datetime import date
 from frappe.utils import flt, cstr
 from fedex.tools.conversion import sobject_to_dict
 from frappe.utils.file_manager import save_file
+from .fedex_rest_api import get_rate_quote_rest, create_shipment_rest, track_shipment_rest, \
+    delete_shipment_rest, validate_address_rest
 
 uom_mapper = {"Kg": "KG", "LB": "LB", "kg": "KG", "cm": "CM"}
 allowed_docs = ['Sales Invoice', 'Purchase Order', 'Customer', 'Supplier', 'Company', 'Employee', 'Sales Partner']
@@ -18,17 +20,19 @@ allowed_docs_items = ['Sales Invoice', 'Purchase Order']
 def get_rates_from_fedex(track_doc):
     credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc, transporter_doc, \
     contact_doc = get_required_docs(track_doc)
-    rate_service(track_doc, credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc,
-                 transporter_doc)
+    # Use REST API for rate quotes
+    get_rate_quote_rest(track_doc, transporter_doc, from_address_doc, to_address_doc, 
+                       from_country_doc, to_country_doc)
 
 def shipment_booking(track_doc):
     credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc, \
     transporter_doc, contact_doc = get_required_docs(track_doc)
 
-    rate_service(track_doc, credentials, from_address_doc, to_address_doc, from_country_doc,
-                 to_country_doc, transporter_doc)
-    create_shipment_service(track_doc, credentials, from_address_doc, to_address_doc,
-                            from_country_doc, to_country_doc, transporter_doc, contact_doc)
+    # Use REST API for shipment booking
+    from rigpl_erpnext.rigpl_erpnext.doctype.carrier_tracking.fedex_rest_api import create_shipment_rest
+    
+    create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_address_doc,
+                        from_country_doc, to_country_doc, contact_doc)
 
 def start_delete_shipment(track_doc):
     credentials = get_required_docs(track_doc)[0]
@@ -632,5 +636,5 @@ def get_fedex_credentials(transporter_doc):
                               password=transporter_doc.fedex_password,
                               account_number=transporter_doc.fedex_account_number,
                               meter_number=transporter_doc.fedex_meter_number,
-                              use_test_server=transporter_doc.is_test_server)
+                              use_test_server=1)
     return credentials

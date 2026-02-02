@@ -357,10 +357,10 @@ class CarrierTracking(WebsiteGenerator):
                             elif trans_doc.dtdc_credentials == 1:
                                 self.get_rates()
                                 dtdc_shipment_booking(self)
-                            else:
-                                frappe.throw('Shipment booking for {} is Not Available in {}'.
-                                             format(frappe.get_desk_link('Transporters', self.carrier_name),
-                                                    frappe.get_desk_link(self.doctype, self.name)))
+                            # else:
+                            #     frappe.throw('Shipment booking for {} is Not Available in {}'.
+                            #                  format(frappe.get_desk_link('Transporters', self.carrier_name),
+                            #                         frappe.get_desk_link(self.doctype, self.name)))
                             self.published = 1
                             self.route = self.name.lower()
                             self.docstatus = 1
@@ -455,10 +455,11 @@ class CarrierTracking(WebsiteGenerator):
         frm_add_doc = frappe.get_doc('Address', frm_add)
         to_add_doc = frappe.get_doc('Address', to_add)
         if tpt_doc.is_domestic_only == 1:
-            if frm_add_doc.country != to_add_doc.country:
-                frappe.throw('For {} {} is Only for Domestic Booking'.
-                             format(frappe.get_desk_link(self.doctype, self.name),
-                                    frappe.get_desk_link('Transporters', self.carrier_name)))
+            pass
+            # if frm_add_doc.country != to_add_doc.country:
+            #     frappe.throw('For {} {} is Only for Domestic Booking'.
+            #                  format(frappe.get_desk_link(self.doctype, self.name),
+            #                         frappe.get_desk_link('Transporters', self.carrier_name)))
 
 
 @frappe.whitelist()

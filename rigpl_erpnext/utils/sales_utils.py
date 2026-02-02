@@ -471,8 +471,9 @@ def validate_warehouse(doc, row):
 def validate_address_google_update(add_doc_name):
     add_doc = frappe.get_doc('Address', add_doc_name)
     if not add_doc.json_reply and add_doc.dont_update_from_google != 1:
-        frappe.throw('Address {} is Not Updated from Google, Please Open and Save '
-                     'the Address once'.format(add_doc.name))
+        pass
+        # frappe.throw('Address {} is Not Updated from Google, Please Open and Save '
+        #              'the Address once'.format(add_doc.name))
 
 
 def copy_address_and_check(document):
