@@ -36,7 +36,8 @@ FEDEX_API_URLS = {
         "rate": "https://apis-sandbox.fedex.com/rate/v1/rates/quotes",
         "track": "https://apis-sandbox.fedex.com/track/v1/trackingnumbers",
         "address": "https://apis-sandbox.fedex.com/address/v1/addresses/resolve",
-        "cancel": "https://apis-sandbox.fedex.com/ship/v1/shipments/cancel"
+        "cancel": "https://apis-sandbox.fedex.com/ship/v1/shipments/cancel",
+        "availability": "https://apis-sandbox.fedex.com/availability/v1/transittimes"
     },
     "production": {
         "auth": "https://apis.fedex.com/oauth/token",
@@ -44,7 +45,8 @@ FEDEX_API_URLS = {
         "rate": "https://apis.fedex.com/rate/v1/rates/quotes",
         "track": "https://apis.fedex.com/track/v1/trackingnumbers",
         "address": "https://apis.fedex.com/address/v1/addresses/resolve",
-        "cancel": "https://apis.fedex.com/ship/v1/shipments/cancel"
+        "cancel": "https://apis.fedex.com/ship/v1/shipments/cancel",
+        "availability": "https://apis.fedex.com/availability/v1/transittimes"
     }
 }
 
@@ -60,7 +62,7 @@ def get_api_base_url(transporter_doc, endpoint_type):
     Returns:
         str: Full URL for the endpoint
     """
-    env = "test" if 1 else "production"
+    env = "test" if transporter_doc.is_test_server else "production"
     return FEDEX_API_URLS[env][endpoint_type]
 
 
@@ -336,6 +338,10 @@ def build_customs_detail(track_doc, transporter_doc, is_international,
     customs_amount = max(customs_amount, 100.0)  # Minimum 100
     
     customs_detail = {
+        "customsValue": {
+            "amount": customs_amount,
+            "currency": track_doc.currency if track_doc.currency else "INR"
+        },
         "dutiesPayment": {
             "paymentType": track_doc.duties_payment_by if track_doc.duties_payment_by else "SENDER",
             "payor": {
@@ -462,7 +468,7 @@ def build_package_item(track_doc, pkg, pkg_doc, sequence_number):
         "sequenceNumber": sequence_number,
         "weight": {
             "units": uom_mapper.get(track_doc.weight_uom, "KG"),
-            "value": float(pkg.weight_per_unit)
+            "value": float(pkg.package_weight)
         }
     }
     
@@ -472,7 +478,7 @@ def build_package_item(track_doc, pkg, pkg_doc, sequence_number):
             "length": int(pkg_doc.length),
             "width": int(pkg_doc.width),
             "height": int(pkg_doc.height),
-            "units": uom_mapper.get(pkg_doc.dimension_uom, "CM")
+            "units": uom_mapper.get(pkg_doc.uom, "CM")
         }
     
     # Add customer reference if document name is available
@@ -560,42 +566,15 @@ def get_rate_quote_rest(track_doc, transporter_doc, from_address_doc, to_address
     is_express_service = "EXPRESS" in transporter_doc.fedex_service_code or "INTERNATIONAL" in transporter_doc.fedex_service_code
     
     if is_international or is_express_service:
-        # Map Frappe purpose to FedEx shipment purpose
-        purpose_mapping = {
-            "SAMPLE": "NOT_SOLD",
-            "GIFT": "GIFT",
-            "REPAIR": "REPAIR_AND_RETURN",
-            "RETURN": "REPAIR_AND_RETURN",
-            "PERSONAL": "PERSONAL_EFFECTS",
-            "SOLD": "SOLD"
-        }
+        allowed_docs_items = ['Sales Invoice', 'Purchase Order', 'Delivery Note']
+        allowed_docs = ['Carrier Tracking']
         
-        fedex_purpose = "NOT_SOLD"  # Default
-        if track_doc.purpose:
-            for key, value in purpose_mapping.items():
-                if key in track_doc.purpose.upper():
-                    fedex_purpose = value
-                    break
+        customs_detail = build_customs_detail(track_doc, transporter_doc, is_international,
+                                             allowed_docs_items, allowed_docs, from_country_doc)
         
-        # Calculate customs value with minimum of 100.0 to meet FedEx requirements
-        customs_amount = flt(track_doc.amount) if track_doc.amount else 100.0
-        customs_amount = max(customs_amount, 100.0)  # Enforce minimum 100
-        
-        customs_detail = {
-            "customsValue": {
-                "amount": customs_amount,
-                "currency": track_doc.currency if track_doc.currency else "INR"
-            },
-            "commercialInvoice": {
-                "shipmentPurpose": fedex_purpose
-            }
-        }
-        
-        # Add duties payment for true international shipments
-        if is_international:
-            customs_detail["dutiesPayment"] = {
-                "paymentType": track_doc.duties_payment_by if track_doc.duties_payment_by else "SENDER"
-            }
+        # Consistent domestic logic (strip conflicting fields if domestic but using international service)
+        if not is_international and customs_detail:
+             customs_detail = {"customsValue": customs_detail.get("customsValue")}
     
     # Build request payload
     payload = {
@@ -709,10 +688,20 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
     to_state_doc = None
     if to_address_doc.state_rigpl and to_address_doc.state_rigpl != "":
         to_state_doc = frappe.get_doc("State", to_address_doc.state_rigpl)
-    
+        
+    # Determine if international shipment
+    is_international = from_country_doc.code != to_country_doc.code
+    is_express_service = "EXPRESS" in transporter_doc.fedex_service_code or "INTERNATIONAL" in transporter_doc.fedex_service_code
+
+
+
     # Build shipper information with TIN
+    # For International shipments, do NOT attach the account number to the Shipper entity
+    # This prevents "Unauthorized" errors if the Account is US-based but Shipper is IN.
+    # Billing is handled by shippingChargesPayment.
+    shipper_account = None 
     shipper = build_party_info(from_address_doc, from_country_doc, from_state_doc, 
-                               transporter_doc.fedex_account_number, is_shipper=True)
+                               shipper_account, is_shipper=True)
     
     # Build recipient information with contact details
     recipient = build_party_info(to_address_doc, to_country_doc, to_state_doc, 
@@ -722,15 +711,19 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
     track_doc.recipient_details = build_recipient_display(to_address_doc, to_country_doc, 
                                                           to_state_doc, contact_doc)
     
-    # Determine if international shipment
-    is_international = from_country_doc.code != to_country_doc.code
-    is_express_service = "EXPRESS" in transporter_doc.fedex_service_code or "INTERNATIONAL" in transporter_doc.fedex_service_code
     
     # Build customs clearance detail if needed
     customs_detail = None
     if is_international or is_express_service:
         customs_detail = build_customs_detail(track_doc, transporter_doc, is_international,
                                                allowed_docs_items, allowed_docs, from_country_doc)
+        
+        # For domestic shipments using international services (e.g. India Domestic Priority),
+        # we need customsValue (built above) but NOT dutiesPayment, commercialInvoice, or commodities
+        # as these trigger full international validation which fails for domestic accounts.
+        if not is_international and customs_detail:
+            # Create a new dict with ONLY customsValue
+            customs_detail = {"customsValue": customs_detail.get("customsValue")}
     
     # Process packages - FedEx requires sequential API calls for multi-package shipments
     pkg_count = track_doc.total_handling_units
@@ -751,7 +744,7 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
                 "shipDatestamp": datetime.now().strftime("%Y-%m-%d"),
                 "serviceType": transporter_doc.fedex_service_code,
                 "packagingType": "YOUR_PACKAGING",
-                "pickupType": "USE_SCHEDULED_PICKUP",
+                "pickupType": "DROPOFF_AT_FEDEX_LOCATION",  # Safer default to avoid "Unauthorized" for pickup scheduling
                 "blockInsightVisibility": False,
                 "shippingChargesPayment": {
                     "paymentType": "SENDER",
@@ -785,12 +778,13 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
             payload["requestedShipment"]["customsClearanceDetail"] = customs_detail
             
             # Add shipping documents for commercial invoice
-            if track_doc.purpose == "SOLD":
+            # Required for all international shipments to generate the invoice PDF
+            if is_international or track_doc.purpose == "SOLD":
                 payload["requestedShipment"]["shippingDocumentSpecification"] = {
                     "shippingDocumentTypes": ["COMMERCIAL_INVOICE"],
                     "commercialInvoiceDetail": {
                         "documentFormat": {
-                            "imageType": "PDF",
+                            "docType": "PDF",
                             "stockType": "PAPER_LETTER"
                         }
                     }
@@ -801,8 +795,8 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
             payload["requestedShipment"]["shipmentSpecialServices"] = {
                 "specialServiceTypes": ["RETURN_SHIPMENT"] if track_doc.purpose == "RETURN" else []
             }
-            payload["requestedShipment"]["customsClearanceDetail"] = payload["requestedShipment"].get("customsClearanceDetail", {})
             if track_doc.purpose == "SOLD":
+                payload["requestedShipment"]["customsClearanceDetail"] = payload["requestedShipment"].get("customsClearanceDetail", {})
                 payload["requestedShipment"]["customsClearanceDetail"]["commercialInvoice"] = {
                     "shipmentPurpose": "SOLD"
                 }
@@ -861,9 +855,37 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
         else:
             frappe.throw("No response received from FedEx")
     
-    # Update tracking document status
+    frappe.log_error(f"FedEx Tracking Number Extracted: {track_doc.awb_number}", "FedEx Debug")
+
+    # Update tracking document status and AWB Persistence
     track_doc.status = "Booked"
-    track_doc.save()
+    
+    if track_doc.awb_number:
+         # Use set_value to persist immediately without full save overhead
+        frappe.db.set_value(track_doc.doctype, track_doc.name, 'awb_number', track_doc.awb_number)
+        frappe.db.set_value(track_doc.doctype, track_doc.name, 'status', 'Booked')
+                
+        # Reload to sync timestamp and avoid TimestampMismatch in caller
+        track_doc.reload()
+    else:
+        frappe.log_error("FedEx AWB Number is Missing before save!", "FedEx Debug")
+        frappe.throw("FedEx AWB generation failed (Empty AWB)")
+            
+    frappe.msgprint(f"Shipment booked successfully. Tracking Number: {track_doc.awb_number}")
+    return track_doc.awb_number
+    
+    frappe.log_error(f"FedEx Tracking Number Extracted: {track_doc.awb_number}", "FedEx Debug")
+    
+    if track_doc.awb_number:
+        # Use set_value to persist immediately without full save overhead
+        frappe.db.set_value(track_doc.doctype, track_doc.name, 'awb_number', track_doc.awb_number)
+        frappe.db.set_value(track_doc.doctype, track_doc.name, 'status', 'Booked')
+        
+        # Reload to sync timestamp and avoid TimestampMismatch in caller
+        track_doc.reload()
+    else:
+        frappe.log_error("FedEx AWB Number is Missing before save!", "FedEx Debug")
+        frappe.throw("FedEx AWB generation failed (Empty AWB)")
     
     frappe.msgprint(f"Shipment booked successfully. Tracking Number: {track_doc.awb_number}")
     return track_doc.awb_number
@@ -871,15 +893,150 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
 
 def track_shipment_rest(track_doc, transporter_doc):
     """
-    Track shipment using FedEx REST API
+    Track shipment using FedEx REST API and update status/scans
     
     Args:
         track_doc: Carrier Tracking doctype document
         transporter_doc: Transporters doctype document
     """
-    # This is a placeholder for the tracking implementation
-    # Will be implemented in the next iteration
-    frappe.throw("Tracking REST API implementation in progress")
+    if not track_doc.awb_number or track_doc.awb_number == "NA":
+        frappe.msgprint("Tracking Number is required to track shipment")
+        return
+        
+    # Build payload
+    payload = {
+        "includeDetailedScans": True,
+        "trackingInfo": [
+            {
+                "trackingNumberInfo": {
+                    "trackingNumber": track_doc.awb_number
+                }
+            }
+        ]
+    }
+    
+    # Make API request
+    response = make_api_request(transporter_doc, "track", payload, method="POST")
+    
+    if response.get("output") and response["output"].get("completeTrackResults"):
+        track_result = response["output"]["completeTrackResults"][0]
+        
+        if track_result.get("trackResults"):
+            details = track_result["trackResults"][0]
+            
+            # Check for errors in specific tracking result
+            if details.get("error"):
+                error_msg = details["error"].get("message", "Unknown tracking error")
+                frappe.msgprint(f"Tracking Error for {track_doc.awb_number}: {error_msg}")
+                return
+            
+            # --- 1. Update Status Code & Description ---
+            latest_status = details.get("latestStatusDetail", {})
+            status_code = latest_status.get("code")
+            status_desc = latest_status.get("description")
+            
+            if status_code:
+                # Map FedEx status codes to our internal status
+                if status_code == "DL":
+                    track_doc.status = "Delivered"
+                elif status_code == "CA":
+                    track_doc.status = "Cancelled"
+                    track_doc.docstatus = 2 # Cancel the document
+                elif status_code == "OC":
+                    track_doc.status = "Booked" # Shipment information sent to FedEx
+                else: 
+                    # IT (In Transit), PU (Picked Up), etc.
+                    track_doc.status = "In Transit"
+                
+                track_doc.status_code = status_code
+                
+                # If delivered, get signature/recipient info
+                if status_code == "DL":
+                   delivery_details = details.get("deliveryDetails", {})
+                   if delivery_details.get("receivedByName"):
+                       track_doc.recipient = delivery_details.get("receivedByName")
+                   elif delivery_details.get("actualDeliveryAddress", {}).get("city"):
+                        # Fallback if no name
+                        pass
+
+            # --- 2. Update Ship To City ---
+            # Helper to format address string
+            def format_address(addr_dict):
+                parts = [
+                    addr_dict.get("city"),
+                    addr_dict.get("stateOrProvinceCode"),
+                    addr_dict.get("countryName") or addr_dict.get("countryCode")
+                ]
+                return ", ".join([p for p in parts if p])
+
+            dest_addr = details.get("destinationAddress", {})
+            if dest_addr:
+                 track_doc.ship_to_city = format_address(dest_addr)
+
+            # --- 3. Update Delivery Date / Pickup Date ---
+            date_times = details.get("dateAndTimes", [])
+            for dt in date_times:
+                dt_type = dt.get("type")
+                dt_val = dt.get("dateTime")
+                if dt_val:
+                    # FedEx REST usually returns ISO 8601 like '2023-10-25T10:30:00-05:00'
+                    # We strip timezone for simplicity or rely on frappe utils if needed
+                    # Simple truncation to 19 chars gets 'YYYY-MM-DDTHH:MM:SS'
+                    clean_dt = dt_val[:19]
+                    
+                    if dt_type == "ACTUAL_DELIVERY":
+                         track_doc.delivery_date_time = datetime.strptime(clean_dt, '%Y-%m-%dT%H:%M:%S')
+                    elif dt_type == "ACTUAL_PICKUP":
+                         track_doc.pickup_date = datetime.strptime(clean_dt, '%Y-%m-%dT%H:%M:%S')
+
+            # --- 4. Process Scans ---
+            scan_events = details.get("scanEvents", [])
+            if scan_events:
+                track_doc.scans = [] # Clear existing scans to rebuild full history
+                
+                for event in scan_events:
+                    # Prepare scan row
+                    row = {}
+                    
+                    # Time
+                    evt_time = event.get("date")
+                    if evt_time:
+                         row["time"] = datetime.strptime(evt_time[:19], '%Y-%m-%dT%H:%M:%S')
+                    
+                    # Location
+                    loc_data = event.get("scanLocation", {})
+                    row["location"] = format_address(loc_data)
+                    if not row["location"]:
+                        row["location"] = "Base Location"
+                        
+                    # Description / Status Detail
+                    desc = event.get("eventDescription", "")
+                    exc_code = event.get("exceptionCode", "")
+                    exc_desc = event.get("exceptionDescription", "")
+                    
+                    full_desc = desc
+                    if exc_code:
+                        full_desc += f" Excep Code: {exc_code}"
+                    if exc_desc:
+                        full_desc += f" {exc_desc}"
+                        
+                    row["status_detail"] = full_desc[:135] # Truncate to fit field
+                    
+                    # Append to child table
+                    track_doc.append("scans", row)
+            
+            # Convert status updates back to meaningful flags if needed
+            if track_doc.status != "Delivered" and track_doc.status_code != "DL":
+                 track_doc.delivery_date_time = None
+
+            track_doc.save(ignore_permissions=True)
+            frappe.msgprint(f"Tracking updated: {track_doc.status} ({status_desc})")
+            
+        else:
+            frappe.msgprint(f"No tracking details found for {track_doc.awb_number}")
+    else:
+        # Check for global errors (not specific to package)
+        frappe.msgprint("Invalid tracking response from FedEx")
 
 
 def delete_shipment_rest(track_doc, transporter_doc):
@@ -890,9 +1047,53 @@ def delete_shipment_rest(track_doc, transporter_doc):
         track_doc: Carrier Tracking doctype document
         transporter_doc: Transporters doctype document
     """
-    # This is a placeholder for the deletion implementation
-    # Will be implemented in the next iteration
-    frappe.throw("Shipment deletion REST API implementation in progress")
+    if not track_doc.awb_number:
+        frappe.msgprint("No tracking number found to cancel")
+        return
+
+    # Build payload
+    payload = {
+        "accountNumber": {
+            "value": transporter_doc.fedex_account_number
+        },
+        "trackingNumber": track_doc.awb_number
+    }
+    
+    # Log payload for debugging
+    frappe.log_error(f"FedEx Cancel Request: {json.dumps(payload)}", "FedEx Cancel Debug")
+    
+    # Make API request
+    try:
+        response = make_api_request(transporter_doc, "cancel", payload, method="PUT")
+    except Exception as e:
+        frappe.log_error(f"FedEx Cancel Error: {str(e)}", "FedEx Cancel Error")
+        frappe.msgprint("Could not cancel shipment on FedEx. It might be already cancelled or invalid.")
+        return
+
+    # Check for success
+    # Successful cancellation usually returns true for "cancelledShipment"
+    if response and response.get("output"):
+        output = response["output"]
+        if output.get("cancelledShipment"):
+            frappe.msgprint(f"Shipment {track_doc.awb_number} successfully cancelled on FedEx")
+            track_doc.status = "Cancelled"
+            track_doc.docstatus = 2 # Cancel/Void document
+            track_doc.save(ignore_permissions=True)
+            return
+        
+        # Handle already deleted or other success-like messages
+        alerts = output.get("alerts", [])
+        if alerts:
+            msg = alerts[0].get("message", "")
+            frappe.msgprint(f"FedEx Alert: {msg}")
+            
+            # If code is related to already deleted, mark as cancelled
+            if "already deleted" in msg.lower() or "not found" in msg.lower():
+                 track_doc.status = "Cancelled"
+                 track_doc.docstatus = 2
+                 track_doc.save(ignore_permissions=True)
+    else:
+        frappe.msgprint("Unknown response from FedEx Cancel API")
 
 
 def validate_address_rest(transporter_doc, address_doc, country_doc):
@@ -904,6 +1105,123 @@ def validate_address_rest(transporter_doc, address_doc, country_doc):
         address_doc: Address doctype document
         country_doc: Country doctype document
     """
-    # This is a placeholder for the address validation implementation
-    # Will be implemented in the next iteration
-    frappe.throw("Address validation REST API implementation in progress")
+    if not address_doc:
+        return
+        
+    # Build payload
+    # FedEx Address Validation uses a slightly different structure than Ship/Rate
+    street_lines = [address_doc.address_line1]
+    if address_doc.address_line2:
+        street_lines.append(address_doc.address_line2)
+        
+    payload = {
+        "addressesToValidate": [
+            {
+                "address": {
+                    "streetLines": street_lines,
+                    "city": address_doc.city,
+                    "stateOrProvinceCode": frappe.get_doc("State", address_doc.state_rigpl).code if address_doc.state_rigpl else "",
+                    "postalCode": address_doc.pincode,
+                    "countryCode": country_doc.code
+                }
+            }
+        ]
+    }
+    
+    # Log payload
+    frappe.log_error(f"FedEx Address Validation Request: {json.dumps(payload)}", "FedEx Address Debug")
+    
+    try:
+        response = make_api_request(transporter_doc, "address", payload, method="POST")
+        
+        if response and response.get("output"):
+            result = response["output"].get("resolvedAddresses", [])[0]
+            
+            # Update address document based on validation
+            # Note: Requires a custom field 'validation_status' on Address if not present
+            # For now, we print message and try to update classification
+            
+            classification = result.get("classification", "UNKNOWN")
+            
+            # Map attributes
+            if classification == "RESIDENTIAL":
+                 # Assuming there's a field for this, otherwise just msgprint
+                 frappe.msgprint(f"Address successfully validated as RESIDENTIAL")
+            elif classification == "BUSINESS":
+                 frappe.msgprint(f"Address successfully validated as BUSINESS")
+            else:
+                 frappe.msgprint(f"Address classification: {classification}")
+                 
+            # Check for changes
+            attrs = result.get("attributes", [])
+            for attr in attrs:
+                if attr.get("name") == "Resolved" and attr.get("value") == "true":
+                     frappe.msgprint("Address Verified by FedEx")
+                     return
+
+            frappe.msgprint("Address could not be fully resolved/verified by FedEx")
+            
+    except Exception as e:
+        frappe.log_error(f"FedEx Address Validation Error: {str(e)}", "FedEx Address Error")
+        frappe.msgprint(f"Address validation failed: {str(e)}")
+def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc):
+    """
+    Get availability and commitment (transit times) from FedEx REST API
+    
+    Args:
+        transporter_doc: Transporters doctype document
+        from_address_doc: From Address doctype document
+        to_address_doc: To Address doctype document
+        from_country_doc: From Country doctype document
+        to_country_doc: To Country doctype document
+    """
+    
+    payload = {
+        "requestedShipment": {
+            "shipper": {
+                "address": {
+                    "postalCode": from_address_doc.pincode,
+                    "countryCode": from_country_doc.code
+                }
+            },
+            "recipients": [
+                {
+                    "address": {
+                        "postalCode": to_address_doc.pincode,
+                        "countryCode": to_country_doc.code
+                    }
+                }
+            ],
+            "shipDatestamp": datetime.now().strftime("%Y-%m-%d"),
+            "packagingType": "YOUR_PACKAGING",
+            "pickupType": "DROPOFF_AT_FEDEX_LOCATION"
+        }
+    }
+    
+    # Log payload
+    frappe.log_error(f"FedEx Availability Request: {json.dumps(payload)}", "FedEx Availability Debug")
+    
+    try:
+        response = make_api_request(transporter_doc, "availability", payload, method="POST")
+        
+        if response and response.get("output"):
+            transit_times = response["output"].get("transitTimes", [])
+            
+            if not transit_times:
+                frappe.msgprint("No transit times available for this route.")
+                return
+
+            msg_html = "<b>Available Services:</b><br><ul>"
+            for option in transit_times:
+                service_type = option.get("serviceType", "Unknown Service")
+                delivery_date = option.get("commit", {}).get("dateDetail", {}).get("dayFormat", "")
+                transit_time = option.get("commit", {}).get("transitDays", {}).get("description", "")
+                
+                frappe.msgprint(f"Service: {service_type}")
+                frappe.msgprint(f"Delivery: {delivery_date}")
+                frappe.msgprint(f"Transit: {transit_time}")
+                frappe.msgprint("")
+                
+    except Exception as e:
+        frappe.log_error(f"FedEx Availability Error: {str(e)}", "FedEx Availability Error")
+        frappe.msgprint(f"Availability check failed: {str(e)}")

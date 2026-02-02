@@ -353,14 +353,19 @@ class CarrierTracking(WebsiteGenerator):
                     if self.get("__islocal") != 1:
                         if packages.idx == 1:
                             if trans_doc.fedex_credentials == 1:
-                                shipment_booking(self)
+                                awb = shipment_booking(self)
+                                if awb:
+                                    self.awb_number = awb
+                                    self.status = "Booked"
+                                else:
+                                     frappe.throw("FedEx booking failed to generate AWB Number")
                             elif trans_doc.dtdc_credentials == 1:
                                 self.get_rates()
                                 dtdc_shipment_booking(self)
-                            # else:
-                            #     frappe.throw('Shipment booking for {} is Not Available in {}'.
-                            #                  format(frappe.get_desk_link('Transporters', self.carrier_name),
-                            #                         frappe.get_desk_link(self.doctype, self.name)))
+                            else:
+                                frappe.throw('Shipment booking for {} is Not Available in {}'.
+                                             format(frappe.get_desk_link('Transporters', self.carrier_name),
+                                                    frappe.get_desk_link(self.doctype, self.name)))
                             self.published = 1
                             self.route = self.name.lower()
                             self.docstatus = 1
@@ -396,6 +401,23 @@ class CarrierTracking(WebsiteGenerator):
             remove_all(self.doctype, self.name)
         else:
             frappe.throw("Only Booked Shipments Can be Deleted, {} is in {} Stage".format(self.name, self.status))
+
+    @frappe.whitelist()
+    def track_shipment(self):
+        """
+        Track shipment manually
+        """
+        if self.awb_number and self.awb_number != "NA" and self.status not in ["Delivered", "Cancelled"]:
+            tpt_doc = frappe.get_doc("Transporters", self.carrier_name)
+            
+            if tpt_doc.fedex_credentials == 1:
+                from rigpl_erpnext.rigpl_erpnext.doctype.carrier_tracking.fedex_rest_api import track_shipment_rest
+                track_shipment_rest(self, tpt_doc)
+            elif tpt_doc.dtdc_credentials == 1:
+                from rigpl_erpnext.rigpl_erpnext.doctype.carrier_tracking.dtdc_functions import get_tracking_from_dtdc
+                get_tracking_from_dtdc(self)
+            else:
+                frappe.msgprint("Tracking not available for this carrier")
 
     def set_recipient_email(self, to_address_doc, contact_doc):
         to_add_email = get_email_id(to_address_doc.email_id)
