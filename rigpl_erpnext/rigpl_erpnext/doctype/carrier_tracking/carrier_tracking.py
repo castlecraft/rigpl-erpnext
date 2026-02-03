@@ -25,6 +25,12 @@ class CarrierTracking(WebsiteGenerator):
     
     @frappe.whitelist()
     def get_dtdc_pdf(self):
+        # Redirect to FedEx signature proof if this is a FedEx carrier
+        # This handles cases where the UI button might be misconfigured
+        if "Fedex" in self.carrier_name or "FEDEX" in self.carrier_name.upper():
+            self.get_sign_proof()
+            return
+            
         dtdc_get_pdf(self.awb_number, self)
 
     def pushdata(self):

@@ -37,7 +37,8 @@ FEDEX_API_URLS = {
         "track": "https://apis-sandbox.fedex.com/track/v1/trackingnumbers",
         "address": "https://apis-sandbox.fedex.com/address/v1/addresses/resolve",
         "cancel": "https://apis-sandbox.fedex.com/ship/v1/shipments/cancel",
-        "availability": "https://apis-sandbox.fedex.com/availability/v1/transittimes"
+        "availability": "https://apis-sandbox.fedex.com/availability/v1/transittimes",
+        "documents": "https://apis-sandbox.fedex.com/track/v1/trackingdocuments"
     },
     "production": {
         "auth": "https://apis.fedex.com/oauth/token",
@@ -46,7 +47,8 @@ FEDEX_API_URLS = {
         "track": "https://apis.fedex.com/track/v1/trackingnumbers",
         "address": "https://apis.fedex.com/address/v1/addresses/resolve",
         "cancel": "https://apis.fedex.com/ship/v1/shipments/cancel",
-        "availability": "https://apis.fedex.com/availability/v1/transittimes"
+        "availability": "https://apis.fedex.com/availability/v1/transittimes",
+        "documents": "https://apis.fedex.com/track/v1/trackingdocuments"
     }
 }
 
@@ -386,43 +388,78 @@ def build_commodities_list(track_doc, allowed_docs_items, allowed_docs, from_cou
     if track_doc.document in allowed_docs_items:
         # Get items from linked document
         doc = frappe.get_doc(track_doc.document, track_doc.document_name)
-        total_qty = 0
+        
+        # Calculate total quantity first for weight distribution
+        total_items_qty = sum(row.qty for row in doc.items)
+        # Ensure total_items_qty is not zero to avoid division by zero
+        if total_items_qty == 0:
+            total_items_qty = 1
+
+        total_shipment_weight = float(track_doc.total_weight)
         
         for row in doc.items:
-            total_qty += row.get("qty")
+            # 1. Calculate Quantity
+            qty = int(row.get("qty", 1))
             
-            # Get HSN code
-            hsn_doc = frappe.get_doc("GST HSN Code",
-                                    frappe.get_value('Item', row.get('item_code'), 'customs_tariff_number'))
+            # 2. Calculate Weight per Commodity Line Item
+            # Try to get weight from Item master first
+            item_weight_per_unit = frappe.get_value("Item", row.get("item_code"), "weight_per_unit")
+            if item_weight_per_unit and item_weight_per_unit > 0:
+                commodity_weight = item_weight_per_unit * qty
+            else:
+                # Fallback: Distribute total shipment weight proportionally
+                commodity_weight = (qty / total_items_qty) * total_shipment_weight
             
-            # Get country of origin
-            item_doc = frappe.get_doc("Item", row.get("item_code"))
-            country_doc = frappe.get_doc("Country", item_doc.country_of_origin)
+            # Ensure weight is formatted to 2 decimals
+            commodity_weight = round(commodity_weight, 2)
+            if commodity_weight <= 0:
+                commodity_weight = 0.01 # Minimum weight
             
+            # 3. Get HSN/Harmonized Code
+            hsn_code = frappe.get_value("Item", row.get("item_code"), "customs_tariff_number")
+            if hsn_code:
+                 hsn_doc = frappe.get_doc("GST HSN Code", hsn_code)
+                 description = hsn_doc.description
+                 harmonized_code = hsn_doc.name
+            else:
+                 description = row.item_name or "General Merchandise"
+                 harmonized_code = "82079090" # Default fallback, maybe unsafe but better than crash
+            
+            # 4. Content Description
+            # Ensure description is not too long (FedEx limit often 450, code used 30 previously)
+            description = (description or row.item_name)[:450]
+
+            # 5. Country of Origin
+            origin_country = from_country_doc.code
+            item_origin = frappe.get_value("Item", row.get("item_code"), "country_of_origin")
+            if item_origin:
+                 origin_country = frappe.get_value("Country", item_origin, "code")
+
             commodity = {
-                "description": hsn_doc.description[:30],
+                "description": description[:30], # Limit to 30 chars as per previous code style
                 "weight": {
                     "units": uom_mapper.get(track_doc.weight_uom, "KG"),
-                    "value": float(track_doc.total_weight)
+                    "value": commodity_weight
                 },
-                "quantity": int(total_qty),
+                "quantity": qty,
                 "quantityUnits": "EA",
                 "unitPrice": {
-                    "amount": float(doc.grand_total / total_qty) if track_doc.purpose == 'SOLD' else 1.0,
+                    "amount": float(row.rate) if track_doc.purpose == 'SOLD' else 1.0, # Use actual Rate
                     "currency": doc.currency
                 },
                 "customsValue": {
-                    "amount": float(doc.grand_total) if track_doc.purpose == 'SOLD' else 1.0,
+                    "amount": float(row.amount) if track_doc.purpose == 'SOLD' else 1.0, # Use actual Amount
                     "currency": doc.currency
                 },
-                "harmonizedCode": hsn_doc.name[:14],  # First 14 characters
-                "countryOfManufacture": country_doc.code[:2].upper()
+                "harmonizedCode": harmonized_code[:14],
+                "countryOfManufacture": (origin_country or "IN")[:2].upper(),
+                "numberOfPieces": 1 # Assuming mixed in box, or 1 box total
             }
             commodities.append(commodity)
             
     elif track_doc.document in allowed_docs:
         # Generic commodity for documents without items
-        total_qty = track_doc.total_handling_units
+        total_qty = track_doc.total_handling_units or 1
         desc = "OTHER PRINTED MATTER, INCLUDING PRINTED PICTURES AND PHOTOGRAPHS"
         
         commodity = {
@@ -434,7 +471,7 @@ def build_commodities_list(track_doc, allowed_docs_items, allowed_docs, from_cou
             "quantity": int(total_qty),
             "quantityUnits": "EA",
             "unitPrice": {
-                "amount": float(track_doc.amount / total_qty) if total_qty > 0 else 1.0,
+                "amount": float(track_doc.amount / total_qty) if total_qty > 0 and track_doc.amount else 1.0,
                 "currency": track_doc.currency if track_doc.currency else "INR"
             },
             "customsValue": {
@@ -442,7 +479,8 @@ def build_commodities_list(track_doc, allowed_docs_items, allowed_docs, from_cou
                 "currency": track_doc.currency if track_doc.currency else "INR"
             },
             "harmonizedCode": "49111010",
-            "countryOfManufacture": from_country_doc.code[:2].upper()
+            "countryOfManufacture": from_country_doc.code[:2].upper(),
+            "numberOfPieces": 1
         }
         commodities.append(commodity)
     else:
@@ -666,85 +704,100 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
                         from_country_doc, to_country_doc, contact_doc):
     """
     Create shipment using FedEx REST API and generate labels
-    
-    Args:
-        track_doc: Carrier Tracking doctype document
-        transporter_doc: Transporters doctype document
-        from_address_doc: From Address doctype document
-        to_address_doc: To Address doctype document
-        from_country_doc: From Country doctype document
-        to_country_doc: To Country doctype document
-        contact_doc: Contact doctype document
     """
-    # Allowed document types for commodities
+
     allowed_docs_items = ['Sales Invoice', 'Purchase Order', 'Delivery Note']
     allowed_docs = ['Carrier Tracking']
-    
-    # Get state documents if available
+
+    # ---------------------------------------------------------
+    # State Documents
+    # ---------------------------------------------------------
     from_state_doc = None
-    if from_address_doc.state_rigpl and from_address_doc.state_rigpl != "":
+    if from_address_doc.state_rigpl:
         from_state_doc = frappe.get_doc("State", from_address_doc.state_rigpl)
-    
+
     to_state_doc = None
-    if to_address_doc.state_rigpl and to_address_doc.state_rigpl != "":
+    if to_address_doc.state_rigpl:
         to_state_doc = frappe.get_doc("State", to_address_doc.state_rigpl)
-        
-    # Determine if international shipment
+
+    # ---------------------------------------------------------
+    # Shipment Type
+    # ---------------------------------------------------------
     is_international = from_country_doc.code != to_country_doc.code
-    is_express_service = "EXPRESS" in transporter_doc.fedex_service_code or "INTERNATIONAL" in transporter_doc.fedex_service_code
+    is_express_service = (
+        "EXPRESS" in transporter_doc.fedex_service_code
+        or "INTERNATIONAL" in transporter_doc.fedex_service_code
+    )
 
+    # ---------------------------------------------------------
+    # Shipper & Recipient
+    # ---------------------------------------------------------
+    shipper = build_party_info(
+        from_address_doc,
+        from_country_doc,
+        from_state_doc,
+        None,                # DO NOT pass account here
+        is_shipper=True
+    )
 
+    recipient = build_party_info(
+        to_address_doc,
+        to_country_doc,
+        to_state_doc,
+        contact_person=contact_doc,
+        is_shipper=False
+    )
 
-    # Build shipper information with TIN
-    # For International shipments, do NOT attach the account number to the Shipper entity
-    # This prevents "Unauthorized" errors if the Account is US-based but Shipper is IN.
-    # Billing is handled by shippingChargesPayment.
-    shipper_account = None 
-    shipper = build_party_info(from_address_doc, from_country_doc, from_state_doc, 
-                               shipper_account, is_shipper=True)
-    
-    # Build recipient information with contact details
-    recipient = build_party_info(to_address_doc, to_country_doc, to_state_doc, 
-                                 contact_person=contact_doc, is_shipper=False)
-    
-    # Store recipient details for display
-    track_doc.recipient_details = build_recipient_display(to_address_doc, to_country_doc, 
-                                                          to_state_doc, contact_doc)
-    
-    
-    # Build customs clearance detail if needed
+    track_doc.recipient_details = build_recipient_display(
+        to_address_doc, to_country_doc, to_state_doc, contact_doc
+    )
+
+    # ---------------------------------------------------------
+    # Customs
+    # ---------------------------------------------------------
     customs_detail = None
     if is_international or is_express_service:
-        customs_detail = build_customs_detail(track_doc, transporter_doc, is_international,
-                                               allowed_docs_items, allowed_docs, from_country_doc)
-        
-        # For domestic shipments using international services (e.g. India Domestic Priority),
-        # we need customsValue (built above) but NOT dutiesPayment, commercialInvoice, or commodities
-        # as these trigger full international validation which fails for domestic accounts.
+        customs_detail = build_customs_detail(
+            track_doc,
+            transporter_doc,
+            is_international,
+            allowed_docs_items,
+            allowed_docs,
+            from_country_doc
+        )
+
+        # Domestic + International service → keep only customsValue
         if not is_international and customs_detail:
-            # Create a new dict with ONLY customsValue
-            customs_detail = {"customsValue": customs_detail.get("customsValue")}
-    
-    # Process packages - FedEx requires sequential API calls for multi-package shipments
+            customs_detail = {
+                "customsValue": customs_detail.get("customsValue")
+            }
+
+    # ---------------------------------------------------------
+    # Packages
+    # ---------------------------------------------------------
     pkg_count = track_doc.total_handling_units
     master_tracking_id = None
-    
+
     for index, pkg in enumerate(track_doc.shipment_package_details):
+
         pkg_doc = frappe.get_doc("Shipment Package", pkg.shipment_package)
-        
-        # Build package line item
-        package_item = build_package_item(track_doc, pkg, pkg_doc, index + 1)
-        
-        # Build base payload
+
+        package_item = build_package_item(
+            track_doc, pkg, pkg_doc, index + 1
+        )
+
         payload = {
             "labelResponseOptions": "LABEL",
+            "accountNumber": {
+                "value": transporter_doc.fedex_account_number
+            },
             "requestedShipment": {
                 "shipper": shipper,
                 "recipients": [recipient],
                 "shipDatestamp": datetime.now().strftime("%Y-%m-%d"),
                 "serviceType": transporter_doc.fedex_service_code,
                 "packagingType": "YOUR_PACKAGING",
-                "pickupType": "DROPOFF_AT_FEDEX_LOCATION",  # Safer default to avoid "Unauthorized" for pickup scheduling
+                "pickupType": "DROPOFF_AT_FEDEX_LOCATION",
                 "blockInsightVisibility": False,
                 "shippingChargesPayment": {
                     "paymentType": "SENDER",
@@ -765,20 +818,18 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
                 "requestedPackageLineItems": [package_item]
             }
         }
-        
-        # Add master tracking ID for subsequent packages
+
+        # Master tracking for multi-piece
         if index > 0 and master_tracking_id:
             payload["requestedShipment"]["masterTrackingId"] = {
                 "trackingNumber": master_tracking_id
             }
             payload["requestedShipment"]["packageCount"] = pkg_count
-        
-        # Add customs detail if needed
+
+        # Customs
         if customs_detail:
             payload["requestedShipment"]["customsClearanceDetail"] = customs_detail
-            
-            # Add shipping documents for commercial invoice
-            # Required for all international shipments to generate the invoice PDF
+
             if is_international or track_doc.purpose == "SOLD":
                 payload["requestedShipment"]["shippingDocumentSpecification"] = {
                     "shippingDocumentTypes": ["COMMERCIAL_INVOICE"],
@@ -789,105 +840,90 @@ def create_shipment_rest(track_doc, transporter_doc, from_address_doc, to_addres
                         }
                     }
                 }
-        
-        # Add reference if document name is available
-        if track_doc.document_name:
-            payload["requestedShipment"]["shipmentSpecialServices"] = {
-                "specialServiceTypes": ["RETURN_SHIPMENT"] if track_doc.purpose == "RETURN" else []
-            }
-            if track_doc.purpose == "SOLD":
-                payload["requestedShipment"]["customsClearanceDetail"] = payload["requestedShipment"].get("customsClearanceDetail", {})
-                payload["requestedShipment"]["customsClearanceDetail"]["commercialInvoice"] = {
-                    "shipmentPurpose": "SOLD"
-                }
-        
-        # Log payload for debugging
-        frappe.log_error(f"FedEx Shipment Request Payload (Package {index+1}/{pkg_count}):\n{json.dumps(payload, indent=2)}", 
-                        "FedEx Shipment Debug")
-        
-        # Make API request
-        response = make_api_request(transporter_doc, "ship", payload, method="POST")
-        
-        # Extract tracking number and label
-        if response and "output" in response:
-            output = response["output"]
-            
-            # Get tracking number
-            if "transactionShipments" in output and len(output["transactionShipments"]) > 0:
-                shipment_data = output["transactionShipments"][0]
-                
-                if "masterTrackingNumber" in shipment_data:
-                    tracking_number = shipment_data["masterTrackingNumber"]
-                elif "pieceResponses" in shipment_data and len(shipment_data["pieceResponses"]) > 0:
-                    tracking_number = shipment_data["pieceResponses"][0].get("trackingNumber")
-                else:
-                    frappe.throw("No tracking number received from FedEx")
-                
-                # Store master tracking ID for subsequent packages
-                if index == 0:
-                    master_tracking_id = tracking_number
-                    track_doc.awb_number = tracking_number
-                
-                # Store label
-                if "pieceResponses" in shipment_data and len(shipment_data["pieceResponses"]) > 0:
-                    piece = shipment_data["pieceResponses"][0]
-                    if "packageDocuments" in piece:
-                        for doc in piece["packageDocuments"]:
-                            if doc.get("docType") == "LABEL" and "encodedLabel" in doc:
-                                label_data = base64.b64decode(doc["encodedLabel"])
-                                store_file(f'FEDEX-ID-{tracking_number}.pdf', label_data, 
-                                         track_doc.doctype, track_doc.name)
-                
-                # Store commercial invoice if present
-                if "shipmentDocuments" in shipment_data:
-                    for doc in shipment_data["shipmentDocuments"]:
-                        if doc.get("contentKey") == "COMMERCIAL_INVOICE" and "encodedLabel" in doc:
-                            invoice_data = base64.b64decode(doc["encodedLabel"])
-                            store_file(f'COMMER-INV-{track_doc.name}-{tracking_number}.pdf', 
-                                     invoice_data, track_doc.doctype, track_doc.name)
-                
-                # Update package details
-                pkg.tracking_number = tracking_number
-                pkg.api_response = json.dumps(response, indent=2)
-                
-            else:
-                frappe.throw("Invalid response structure from FedEx")
-        else:
-            frappe.throw("No response received from FedEx")
-    
-    frappe.log_error(f"FedEx Tracking Number Extracted: {track_doc.awb_number}", "FedEx Debug")
 
-    # Update tracking document status and AWB Persistence
+        # Purpose SOLD
+        if track_doc.purpose == "SOLD":
+            payload["requestedShipment"].setdefault(
+                "customsClearanceDetail", {}
+            )["commercialInvoice"] = {
+                "shipmentPurpose": "SOLD"
+            }
+
+        frappe.log_error(
+            json.dumps(payload, indent=2),
+            f"FedEx Shipment Payload {index+1}/{pkg_count}"
+        )
+
+        # -------------------------------------------------
+        # API Call
+        # -------------------------------------------------
+        response = make_api_request(
+            transporter_doc, "ship", payload, method="POST"
+        )
+
+        if not response or "output" not in response:
+            frappe.throw("No response from FedEx")
+
+        output = response["output"]
+
+        if not output.get("transactionShipments"):
+            frappe.throw(f"Invalid FedEx Response: {json.dumps(response, indent=2)}")
+
+        shipment_data = output["transactionShipments"][0]
+
+        # -------------------------------------------------
+        # Tracking Number
+        # -------------------------------------------------
+        tracking_number = None
+
+        if shipment_data.get("masterTrackingNumber"):
+            tracking_number = shipment_data.get("masterTrackingNumber")
+
+        elif shipment_data.get("pieceResponses"):
+            tracking_number = shipment_data["pieceResponses"][0].get("trackingNumber")
+
+        if not tracking_number:
+            frappe.throw("FedEx did not return tracking number")
+
+        # First piece = AWB
+        if index == 0:
+            master_tracking_id = tracking_number
+            track_doc.awb_number = tracking_number
+            frappe.flags.ignore_version = True
+
+        # -------------------------------------------------
+        # Store Label
+        # -------------------------------------------------
+        if shipment_data.get("pieceResponses"):
+            piece = shipment_data["pieceResponses"][0]
+            for doc in piece.get("packageDocuments", []):
+                if doc.get("docType") == "LABEL":
+                    label_data = base64.b64decode(doc["encodedLabel"])
+                    store_file(
+                        f"FEDEX-{tracking_number}.pdf",
+                        label_data,
+                        track_doc.doctype,
+                        track_doc.name
+                    )
+
+        # -------------------------------------------------
+        # Child Table Update
+        # -------------------------------------------------
+        pkg.tracking_number = tracking_number
+        pkg.api_response = json.dumps(response, indent=2)
+
+    # ---------------------------------------------------------
+    # Final Status
+    # ---------------------------------------------------------
+    if not track_doc.awb_number:
+        frappe.throw("FedEx AWB generation failed")
+
     track_doc.status = "Booked"
-    
-    if track_doc.awb_number:
-         # Use set_value to persist immediately without full save overhead
-        frappe.db.set_value(track_doc.doctype, track_doc.name, 'awb_number', track_doc.awb_number)
-        frappe.db.set_value(track_doc.doctype, track_doc.name, 'status', 'Booked')
-                
-        # Reload to sync timestamp and avoid TimestampMismatch in caller
-        track_doc.reload()
-    else:
-        frappe.log_error("FedEx AWB Number is Missing before save!", "FedEx Debug")
-        frappe.throw("FedEx AWB generation failed (Empty AWB)")
-            
-    frappe.msgprint(f"Shipment booked successfully. Tracking Number: {track_doc.awb_number}")
-    return track_doc.awb_number
-    
-    frappe.log_error(f"FedEx Tracking Number Extracted: {track_doc.awb_number}", "FedEx Debug")
-    
-    if track_doc.awb_number:
-        # Use set_value to persist immediately without full save overhead
-        frappe.db.set_value(track_doc.doctype, track_doc.name, 'awb_number', track_doc.awb_number)
-        frappe.db.set_value(track_doc.doctype, track_doc.name, 'status', 'Booked')
-        
-        # Reload to sync timestamp and avoid TimestampMismatch in caller
-        track_doc.reload()
-    else:
-        frappe.log_error("FedEx AWB Number is Missing before save!", "FedEx Debug")
-        frappe.throw("FedEx AWB generation failed (Empty AWB)")
-    
-    frappe.msgprint(f"Shipment booked successfully. Tracking Number: {track_doc.awb_number}")
+
+    frappe.msgprint(
+        f"Shipment booked successfully. Tracking Number: {track_doc.awb_number}"
+    )
+
     return track_doc.awb_number
 
 
@@ -1120,7 +1156,7 @@ def validate_address_rest(transporter_doc, address_doc, country_doc):
                 "address": {
                     "streetLines": street_lines,
                     "city": address_doc.city,
-                    "stateOrProvinceCode": frappe.get_doc("State", address_doc.state_rigpl).code if address_doc.state_rigpl else "",
+                    "stateOrProvinceCode": frappe.get_doc("State", address_doc.state_rigpl).state_code if address_doc.state_rigpl else "",
                     "postalCode": address_doc.pincode,
                     "countryCode": country_doc.code
                 }
@@ -1153,18 +1189,34 @@ def validate_address_rest(transporter_doc, address_doc, country_doc):
                  frappe.msgprint(f"Address classification: {classification}")
                  
             # Check for changes
-            attrs = result.get("attributes", [])
-            for attr in attrs:
-                if attr.get("name") == "Resolved" and attr.get("value") == "true":
-                     frappe.msgprint("Address Verified by FedEx")
+            # Check for changes
+            attrs = result.get("attributes", {})
+            frappe.log_error(f"FedEx Address Attributes: {attrs}", "FedEx Address Debug")
+            
+            # Handle Dictionary response (standard for this endpoint)
+            if isinstance(attrs, dict):
+                if attrs.get("Matched") is True:
+                     frappe.msgprint("Address Verified by FedEx (Matched)")
                      return
+                if attrs.get("Resolved") == "true":
+                     frappe.msgprint("Address Verified by FedEx (Resolved)")
+                     return
+
+            # Handle List response (fallback)
+            elif isinstance(attrs, list):
+                for attr in attrs:
+                    if isinstance(attr, dict):
+                        if attr.get("name") == "Resolved" and attr.get("value") == "true":
+                            frappe.msgprint("Address Verified by FedEx")
+                            return
 
             frappe.msgprint("Address could not be fully resolved/verified by FedEx")
             
     except Exception as e:
         frappe.log_error(f"FedEx Address Validation Error: {str(e)}", "FedEx Address Error")
         frappe.msgprint(f"Address validation failed: {str(e)}")
-def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc):
+
+def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc, track_doc=None):
     """
     Get availability and commitment (transit times) from FedEx REST API
     
@@ -1174,7 +1226,46 @@ def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, fro
         to_address_doc: To Address doctype document
         from_country_doc: From Country doctype document
         to_country_doc: To Country doctype document
+        track_doc: Carrier Tracking doctype document (optional but recommended for accurate results)
     """
+    
+    # Build package line items
+    requested_packages = []
+    if track_doc and track_doc.shipment_package_details:
+        for row in track_doc.shipment_package_details:
+            package = {
+                "weight": {
+                    "units": uom_mapper.get(row.weight_uom, "KG"),
+                    "value": flt(row.package_weight)
+                }
+            }
+            requested_packages.append(package)
+    else:
+        # Fallback if no track_doc or packages
+        requested_packages = [{
+            "weight": {
+                "units": "KG",
+                "value": 1.0
+            }
+        }]
+
+    # Build customs clearance detail if needed
+    customs_detail = None
+    if track_doc:
+        is_international = from_country_doc.code != to_country_doc.code
+        is_express_service = "EXPRESS" in transporter_doc.fedex_service_code or "INTERNATIONAL" in transporter_doc.fedex_service_code
+        
+        if is_international or is_express_service:
+            allowed_docs_items = ['Sales Invoice', 'Purchase Order', 'Delivery Note']
+            allowed_docs = ['Carrier Tracking']
+            
+            customs_detail = build_customs_detail(track_doc, transporter_doc, is_international,
+                                                allowed_docs_items, allowed_docs, from_country_doc)
+            
+            # Consistent domestic logic
+            if not is_international and customs_detail:
+                customs_detail = {"customsValue": customs_detail.get("customsValue")}
+
     
     payload = {
         "requestedShipment": {
@@ -1194,12 +1285,16 @@ def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, fro
             ],
             "shipDatestamp": datetime.now().strftime("%Y-%m-%d"),
             "packagingType": "YOUR_PACKAGING",
-            "pickupType": "DROPOFF_AT_FEDEX_LOCATION"
-        }
+            "pickupType": "DROPOFF_AT_FEDEX_LOCATION",
+            "requestedPackageLineItems": requested_packages
+        },
+        "carrierCodes": ["FDXE", "FDXG"]
     }
     
-    # Log payload
-    frappe.log_error(f"FedEx Availability Request: {json.dumps(payload)}", "FedEx Availability Debug")
+    if customs_detail:
+        payload["requestedShipment"]["customsClearanceDetail"] = customs_detail
+    
+    
     
     try:
         response = make_api_request(transporter_doc, "availability", payload, method="POST")
@@ -1212,16 +1307,109 @@ def get_availability_rest(transporter_doc, from_address_doc, to_address_doc, fro
                 return
 
             msg_html = "<b>Available Services:</b><br><ul>"
-            for option in transit_times:
-                service_type = option.get("serviceType", "Unknown Service")
-                delivery_date = option.get("commit", {}).get("dateDetail", {}).get("dayFormat", "")
-                transit_time = option.get("commit", {}).get("transitDays", {}).get("description", "")
+            found_services = False
+            
+            for transit_entry in transit_times:
+                # The response structure has transitTimeDetails list inside transitTimes
+                details_list = transit_entry.get("transitTimeDetails", [])
                 
-                frappe.msgprint(f"Service: {service_type}")
-                frappe.msgprint(f"Delivery: {delivery_date}")
-                frappe.msgprint(f"Transit: {transit_time}")
-                frappe.msgprint("")
-                
+                for option in details_list:
+                    found_services = True
+                    service_name = option.get("serviceName", option.get("serviceType", "Unknown Service"))
+                    
+                    commit_info = option.get("commit", {})
+                    # Check for explicit date detail first
+                    date_detail = commit_info.get("dateDetail", {})
+                    delivery_date = date_detail.get("dayFormat", "")
+                    
+                    # If no date, check for label or message (e.g. "Delivery date unavailable")
+                    if not delivery_date:
+                        delivery_date = commit_info.get("label", "") or commit_info.get("commitMessageDetails", "Date unavailable")
+
+                    # Transit days description
+                    transit_time = commit_info.get("transitDays", {}).get("description", "")
+                    
+                    frappe.msgprint(f"Service: {service_name}")
+                    frappe.msgprint(f"Delivery: {delivery_date}")
+                    if transit_time:
+                         frappe.msgprint(f"Transit: {transit_time}")
+                    frappe.msgprint("")
+            
+            if not found_services:
+                 frappe.msgprint("No specific service details found in response.")
+
     except Exception as e:
         frappe.log_error(f"FedEx Availability Error: {str(e)}", "FedEx Availability Error")
         frappe.msgprint(f"Availability check failed: {str(e)}")
+
+def get_signature_proof_rest(track_doc, transporter_doc):
+    """
+    Get Signature Proof of Delivery (SPOD) from FedEx REST API
+    
+    Args:
+        track_doc: Carrier Tracking doctype document
+        transporter_doc: Transporters doctype document
+    """
+    if not track_doc.awb_number or track_doc.awb_number == "NA":
+        frappe.msgprint("No tracking number found (NA). cannot fetch signature proof.")
+        return
+
+    # Safety Check: SPOD is only available for Delivered shipments
+    if track_doc.status_code != "DL":
+        frappe.msgprint("Shipment not delivered yet. Signature Proof is available only after delivery.")
+        return
+
+    # Payload for SPOD
+    payload = {
+        "accountNumber": {
+            "value": transporter_doc.fedex_account_number
+        },
+        "trackDocumentDetail": {
+            "documentType": "SIGNATURE_PROOF_OF_DELIVERY"
+        },
+        "trackDocumentSpecification": [
+            {
+                "trackingNumberInfo": {
+                    "trackingNumber": track_doc.awb_number,
+                    "carrierCode": "FDXE"
+                }
+            }
+        ]
+    }
+
+    
+    
+    try:
+        response = make_api_request(transporter_doc, "documents", payload, method="POST")
+        
+        if response and response.get("output"):
+            docs = response["output"].get("trackDocuments", [])
+            for doc in docs:
+                if doc.get("url"):
+                     # If URL is returned
+                     frappe.msgprint(f"SPOD available at: <a href='{doc['url']}' target='_blank'>View PDF</a>")
+                elif doc.get("document"):
+                     # If Base64 is returned (encoded in 'document' field usually)
+                     # Note: Field name depends on API version, sometimes it's inside a 'parts' list
+                     # We will check common patterns
+                     pdf_content = None
+                     if isinstance(doc.get("document"), str):
+                         pdf_content = doc["document"]
+                     elif doc.get("parts"): # Older/Alternate structure
+                         pdf_content = doc["parts"][0].get("image")
+                     
+                     if pdf_content:
+                        import base64
+                        file_data = base64.b64decode(pdf_content)
+                        filename = f"SPOD-{track_doc.awb_number}.pdf"
+                        save_file(filename, file_data, track_doc.doctype, track_doc.name, is_private=0)
+                        frappe.msgprint(f"Signature Proof retrieved and attached: {filename}")
+                        return
+
+            # Check for errors in the document response
+            if not docs:
+                 frappe.msgprint("No signature proof documents returned.")
+
+    except Exception as e:
+        frappe.log_error(f"FedEx SPOD Error: {str(e)}", "FedEx SPOD Error")
+        frappe.msgprint(f"Could not retrieve Signature Proof: {str(e)}")

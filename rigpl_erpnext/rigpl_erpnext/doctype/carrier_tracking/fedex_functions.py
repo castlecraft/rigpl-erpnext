@@ -11,7 +11,7 @@ from frappe.utils import flt, cstr
 from fedex.tools.conversion import sobject_to_dict
 from frappe.utils.file_manager import save_file
 from .fedex_rest_api import get_rate_quote_rest, create_shipment_rest, track_shipment_rest, \
-    delete_shipment_rest, validate_address_rest, get_availability_rest
+    delete_shipment_rest, validate_address_rest, get_availability_rest, get_signature_proof_rest
 
 uom_mapper = {"Kg": "KG", "LB": "LB", "kg": "KG", "cm": "CM"}
 allowed_docs = ['Sales Invoice', 'Purchase Order', 'Customer', 'Supplier', 'Company', 'Employee', 'Sales Partner']
@@ -50,7 +50,7 @@ def get_available_services(track_doc):
     credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc, transporter_doc, \
     contact_doc = get_required_docs(track_doc)
 
-    availabiltiy_commitment(credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc)
+    availabiltiy_commitment(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc, track_doc)
 
 
 def create_shipment_service(track_doc, credentials, from_address_doc, to_address_doc, from_country_doc,
@@ -172,29 +172,8 @@ def delete_shipment_service(track_doc, credentials, transporter_doc):
 
 
 def get_signature_proof(track_doc):
-    frappe.throw("WIP")
-    credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc, transporter_doc, \
-    contact_doc = get_required_docs(track_doc)
-    trans_doc = frappe.get_doc("Transporters", track_doc.carrier_name)
-    if track_doc.docstatus == 1 and track_doc.status == 'Delivered' and track_doc.sign_proof == 'SIGNATURE_PROOF_OF_DELIVERY' \
-            and trans_doc.fedex_credentials == 1:
-        from fedex.services.track_service import FedexTrackRequest
-        spod = FedexTrackRequest(credentials)
-        for service in spod:
-            frappe.msgprint(str(spod.__dict__))
-        spod_req = spod.create_wsdl_object_of_type('GetTrackingDocumentsRequest')
-        spod.SelectionDetails.PackageIdentifier.Value = track_doc.awb_number
-        # spod_req.SelectionDetails.responseFormat = 'PDF'
-        spod_req_doc_specs = spod_req.TrackingDocumentSpecification
-        spod_req_doc_specs.DocumentTypes = 'SIGNATURE_PROOF_OF_DELIVERY'
-        spod_req_doc_specs.SignatureProofOfDeliveryDetail.DispositionType = 'RETURN'
-        spod_req_doc_specs.SignatureProofOfDeliveryDetail.ImageType = 'PDF'
-        spod.send_request()
-        # frappe.msgprint(str(spod.response))
-        # label_data = base64.b64decode(spod.response.CompletedShipmentDetail.CompletedPackageDetails[0].Label.Parts[0].Image)
-        # track_doc.store_file('FEDEX-ID-{0}.pdf'.format(tracking_id), label_data, ps_doctype, ps_name)
-        # track_doc.save()
-        frappe.msgprint("Go for Proof")
+    transporter_doc = frappe.get_doc("Transporters", track_doc.carrier_name)
+    get_signature_proof_rest(track_doc, transporter_doc)
 
 
 def address_validation(credentials, add_doc, country_doc):
@@ -235,9 +214,9 @@ def address_validation(credentials, add_doc, country_doc):
 
 
 
-def availabiltiy_commitment(credentials, from_address_doc, to_address_doc, from_country_doc, to_country_doc):
+def availabiltiy_commitment(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc, track_doc=None):
     # Use REST API for availability/transit times
-    get_availability_rest(None, from_address_doc, to_address_doc, from_country_doc, to_country_doc)
+    get_availability_rest(transporter_doc, from_address_doc, to_address_doc, from_country_doc, to_country_doc, track_doc)
 
 
 def get_required_docs(track_doc):
