@@ -25,8 +25,6 @@ class CarrierTracking(WebsiteGenerator):
     
     @frappe.whitelist()
     def get_dtdc_pdf(self):
-        # Redirect to FedEx signature proof if this is a FedEx carrier
-        # This handles cases where the UI button might be misconfigured
         if "Fedex" in self.carrier_name or "FEDEX" in self.carrier_name.upper():
             self.get_sign_proof()
             return
@@ -483,11 +481,10 @@ class CarrierTracking(WebsiteGenerator):
         frm_add_doc = frappe.get_doc('Address', frm_add)
         to_add_doc = frappe.get_doc('Address', to_add)
         if tpt_doc.is_domestic_only == 1:
-            pass
-            # if frm_add_doc.country != to_add_doc.country:
-            #     frappe.throw('For {} {} is Only for Domestic Booking'.
-            #                  format(frappe.get_desk_link(self.doctype, self.name),
-            #                         frappe.get_desk_link('Transporters', self.carrier_name)))
+            if frm_add_doc.country != to_add_doc.country:
+                frappe.throw('For {} {} is Only for Domestic Booking'.
+                             format(frappe.get_desk_link(self.doctype, self.name),
+                                    frappe.get_desk_link('Transporters', self.carrier_name)))
 
 
 @frappe.whitelist()

@@ -19,6 +19,7 @@ Key Features:
 
 from __future__ import unicode_literals
 import frappe
+from frappe.utils.file_manager import save_file
 import requests
 import json
 import base64
@@ -1016,7 +1017,7 @@ def track_shipment_rest(track_doc, transporter_doc):
                 dt_val = dt.get("dateTime")
                 if dt_val:
                     # FedEx REST usually returns ISO 8601 like '2023-10-25T10:30:00-05:00'
-                    # We strip timezone for simplicity or rely on frappe utils if needed
+                    # strip timezone for simplicity or rely on frappe utils if needed
                     # Simple truncation to 19 chars gets 'YYYY-MM-DDTHH:MM:SS'
                     clean_dt = dt_val[:19]
                     
@@ -1174,21 +1175,18 @@ def validate_address_rest(transporter_doc, address_doc, country_doc):
             result = response["output"].get("resolvedAddresses", [])[0]
             
             # Update address document based on validation
-            # Note: Requires a custom field 'validation_status' on Address if not present
-            # For now, we print message and try to update classification
+            # print message and try to update classification
             
             classification = result.get("classification", "UNKNOWN")
             
             # Map attributes
             if classification == "RESIDENTIAL":
-                 # Assuming there's a field for this, otherwise just msgprint
                  frappe.msgprint(f"Address successfully validated as RESIDENTIAL")
             elif classification == "BUSINESS":
                  frappe.msgprint(f"Address successfully validated as BUSINESS")
             else:
                  frappe.msgprint(f"Address classification: {classification}")
                  
-            # Check for changes
             # Check for changes
             attrs = result.get("attributes", {})
             frappe.log_error(f"FedEx Address Attributes: {attrs}", "FedEx Address Debug")
@@ -1390,8 +1388,7 @@ def get_signature_proof_rest(track_doc, transporter_doc):
                      frappe.msgprint(f"SPOD available at: <a href='{doc['url']}' target='_blank'>View PDF</a>")
                 elif doc.get("document"):
                      # If Base64 is returned (encoded in 'document' field usually)
-                     # Note: Field name depends on API version, sometimes it's inside a 'parts' list
-                     # We will check common patterns
+                     # check common patterns
                      pdf_content = None
                      if isinstance(doc.get("document"), str):
                          pdf_content = doc["document"]
