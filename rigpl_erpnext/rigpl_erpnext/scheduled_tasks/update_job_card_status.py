@@ -33,13 +33,14 @@ def update_rm_status_unmodified():
 
     for jc in no_rm_jc:
         jcd = frappe.get_doc("Process Job Card RIGPL", jc.name)
-        jcd.time_logs = []
-        try:
-            jcd.save()
-            no_rm_jc_nos += 1
+        if len(jcd.time_logs) > 0:
+            jcd.time_logs = []
+            try:
+                jcd.save()
+                no_rm_jc_nos += 1
 
-        except Exception as e:
-            print(f"Some Error in JCR# {jcd.name} and Error is {e}")
+            except Exception as e:
+                print(f"Some Error in JCR# {jcd.name} and Error is {e}")
 
     print(f"Total Not Modified JCR changed = {no_mod}")
     print(f"Total JCR Modified after 6 hours = {stale_mod}")
