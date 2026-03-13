@@ -42,9 +42,6 @@ def execute():
             f"{fmt_money(it.valuation_rate)} and Total Value = {fmt_money(rol*it.valuation_rate)}")
         it_cached = frappe.get_cached_doc("Item", it.name)
         
-        # We don't need def_wh query here, it was never used.
-        # We also already have ex_rol fetched via SQL in the main loop as `it.rol_qty`
-        # But for exact safety we can just use `it.rol_qty` as ex_rol
         ex_rol = it.rol_qty
         
         new_rol, period, ch_type = auto_compute_rol_for_item(it_cached)
