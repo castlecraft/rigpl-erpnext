@@ -207,7 +207,8 @@ def get_all_ship_data():
     """
     pending_ships = frappe.db.sql("""SELECT ctrack.name as name, tpt.fedex_credentials as fed_cred,
         tpt.dtdc_credentials as dtdc_cred, tpt.dtdc_tracking_only as dtdc_track,
-        ctrack.creation as creation, tpt.fedex_tracking_only as fed_track, ctrack.modified as modified
+        ctrack.creation as creation, tpt.fedex_tracking_only as fed_track, ctrack.modified as modified,
+        ctrack.carrier_name
         FROM `tabCarrier Tracking` ctrack, `tabTransporters` tpt
         WHERE (ctrack.posted_to_shipway = 1 OR tpt.fedex_credentials = 1 or tpt.fedex_tracking_only = 1
         OR tpt.dtdc_credentials = 1 OR tpt.dtdc_tracking_only = 1)
@@ -215,45 +216,54 @@ def get_all_ship_data():
         AND ctrack.status != "Delivered"
         AND ctrack.awb_number != "NA" AND ctrack.awb_number != ""
         ORDER BY ctrack.creation ASC """, as_dict=1)
+    
+    if not pending_ships:
+        return
+
+    # Bulk fetch transporters
+    carrier_names = list(set([t.carrier_name for t in pending_ships]))
+    transporters = frappe.get_all("Transporters", filters={"name": ["in", carrier_names]}, 
+        fields=["name", "fedex_credentials", "fedex_tracking_only", "dtdc_tracking_only", "dtdc_credentials", "track_on_shipway"])
+    trans_map = {t.name: t for t in transporters}
+
     sno = 0
+    now_dt = datetime.now()
+    today_date = now_dt.date()
+
     for tracks in pending_ships:
-        days_diff = (datetime.today().date() - tracks.creation.date()).days
-        last_update_hrs = (datetime.now() - tracks.modified).total_seconds()/3600
+        days_diff = (today_date - tracks.creation.date()).days
+        last_update_hrs = (now_dt - tracks.modified).total_seconds()/3600
+        
         fedex = tracks.fed_track or tracks.fed_cred
         dtdc = tracks.dtdc_track or tracks.dtdc_cred
-        if fedex == 1:
-            track_name = "Fedex"
-        elif dtdc == 1:
-            track_name = "DTDC"
+        
+        track_name = "Fedex" if fedex else ("DTDC" if dtdc else "Shipway")
+        
+        should_update = False
         if (tracks.fed_cred == 1 or tracks.fed_track == 1 or tracks.dtdc_cred == 1 or
                 tracks.dtdc_track == 1) and 150 > days_diff > 1:
-            # Get from Fedex or DTDC only if less than 150 days old
             if last_update_hrs > 6:
-                print(f"{str(sno+1)}. Getting Tracking for {tracks.name} from {track_name}")
-                track_doc = frappe.get_doc("Carrier Tracking", tracks.name)
-                try:
-                    getOrderShipmentDetails(track_doc)
-                except Exception as e:
-                    print(f"Some Error Encountered while getting Tracking for {track_doc.name}\n"
-                        f"Error is {e}")
-            else:
-                print(f"{str(sno+1)}. {track_name} Tracking Was Updated less than 6 hrs ago hence "
-                    f"skipping {tracks.name}")
+                should_update = True
         elif (tracks.fed_cred == 0 and tracks.fed_track == 0 and tracks.dtdc_cred == 0 and
                 tracks.dtdc_track == 0) and 2 < days_diff < 60:
-            # Get from Shipway only less than 60 days old shipments
             if last_update_hrs > 6:
-                print("{}. Getting Tracking for {} from Shipway".format(str(sno+1), tracks.name))
-                track_doc = frappe.get_doc("Carrier Tracking", tracks.name)
-                try:
-                    getOrderShipmentDetails(track_doc)
-                except Exception as e:
-                    print(f"Encountered some error for {tracks.name} \n Error is {e}")
-            else:
-                print("{}. Shipway Tracking was updated less than 6 hrs ago hence skipping {}".
-                      format(str(sno + 1), tracks.name))
-        sno += 1
-        frappe.db.commit()
+                should_update = True
+        
+        if should_update:
+            print(f"{str(sno+1)}. Getting Tracking for {tracks.name} from {track_name}")
+            track_doc = frappe.get_doc("Carrier Tracking", tracks.name)
+            trans_doc = trans_map.get(tracks.carrier_name)
+            try:
+                # Passing trans_doc to avoid another get_doc inside getOrderShipmentDetails
+                getOrderShipmentDetails(track_doc, trans_doc)
+            except Exception as e:
+                print(f"Error for {tracks.name}: {e}")
+            
+            sno += 1
+            if sno % 20 == 0:
+                frappe.db.commit()
+    
+    frappe.db.commit()
 
 
 def pushOrderData(track_doc, trans_doc=None):
@@ -306,12 +316,13 @@ def pushOrderData(track_doc, trans_doc=None):
         print(f"Transporter {trans_doc.name} not tracked on Shipway")
 
 
-def getOrderShipmentDetails(track_doc):
+def getOrderShipmentDetails(track_doc, trans_doc=None):
     """
     Gets tracking for a Particular Carrier Tracking from respecting Carrier
     """
     print("Processing Carrier Tracking #: " + track_doc.name)
-    trans_doc = frappe.get_doc('Transporters', track_doc.carrier_name)
+    if not trans_doc:
+        trans_doc = frappe.get_doc('Transporters', track_doc.carrier_name)
     shipway = 0
     fedex = 0
     dtdc = 0
