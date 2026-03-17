@@ -99,7 +99,13 @@ def check_follow_up_time(date_time, now):
 
 
 def send_follow_up_email(user, sender, subject, content, ref_doc, ref_name):
-    # pass
-    # print(f"Would send Email to User:{user}")
-    frappe.sendmail(recipients=user, sender=sender, subject="Follow Up for: " + subject,
-                   content=content + "\n" + ref_doc + " " + ref_name)
+
+    if not frappe.get_cached_doc("RIGPL Settings").send_follow_up_email:
+        return
+
+    frappe.sendmail(
+        recipients=user,
+        sender=sender,
+        subject=f"Follow Up for: {subject}",
+        content=f"{content}\n{ref_doc} {ref_name}"
+    )
