@@ -203,7 +203,7 @@ def get_attribute_map(item_codes):
 def get_optimized_so_summary(so_data):
     so_item_ids = [d.so_item for d in so_data]
     
-    # Bulk Fetch Process Sheets
+    # 1. Bulk Fetch Process Sheets
     ps_data = frappe.get_all("Process Sheet",
         filters={"sales_order_item": ["in", so_item_ids], "docstatus": ["!=", 2]},
         fields=["name", "sales_order_item"],
@@ -214,32 +214,98 @@ def get_optimized_so_summary(so_data):
         if p.sales_order_item not in ps_map: ps_map[p.sales_order_item] = []
         ps_map[p.sales_order_item].append(p.name)
     
-    # Bulk Fetch Last Job Cards
-    # Using a sub-query group strategy to get the 'latest' per SO item
+    # 2. Bulk Fetch ALL Job Cards with BOM Operation IDX
     jc_data = frappe.db.sql("""
-        SELECT jc.name, jc.status, jc.operation, jc.priority, jc.for_quantity, jc.qty_available, jc.remarks, jc.sales_order_item
+        SELECT jc.name, jc.status, jc.operation, jc.priority, jc.for_quantity, jc.qty_available,
+        jc.docstatus, jc.process_sheet, bmop.idx, jc.total_completed_qty, jc.sales_order_item,
+        jc.remarks as jc_remarks
         FROM `tabProcess Job Card RIGPL` jc
-        INNER JOIN (
-            SELECT MAX(creation) as last_creation, sales_order_item
-            FROM `tabProcess Job Card RIGPL`
-            WHERE sales_order_item IN %s AND docstatus != 2
-            GROUP BY sales_order_item
-        ) latest ON jc.sales_order_item = latest.sales_order_item AND jc.creation = latest.last_creation
+        INNER JOIN `tabBOM Operation` bmop ON bmop.parent = jc.process_sheet AND bmop.operation = jc.operation
+        WHERE jc.docstatus < 2 AND jc.sales_order_item IN %s
     """, (tuple(so_item_ids),), as_dict=1)
     
-    jc_map = {d.sales_order_item: d for d in jc_data}
-    
+    # Group and sort Job Cards per SO Item
+    jc_group = {}
+    all_jc_names = []
+    for jc in jc_data:
+        soi = jc.sales_order_item
+        if soi not in jc_group: jc_group[soi] = []
+        jc_group[soi].append(jc)
+        all_jc_names.append(jc.name)
+        
+    for soi in jc_group:
+        jc_group[soi].sort(key=lambda x: x.idx or 0)
+
+    # 3. Bulk Fetch Subcontracting Operations
+    subcon_ops = frappe.get_all("Operation", filters={"is_subcontracting": 1}, pluck="name")
+
+    # 4. Bulk Fetch PO Details for potential Subcontracting Job Cards
+    po_map = {}
+    if all_jc_names:
+        po_details = frappe.db.sql("""
+            SELECT po.name, po.transaction_date, poi.stock_qty, poi.received_qty, poi.reference_dn
+            FROM `tabPurchase Order` po
+            INNER JOIN `tabPurchase Order Item` poi ON poi.parent = po.name
+            WHERE po.docstatus = 1 AND poi.reference_dt = 'Process Job Card RIGPL'
+            AND poi.reference_dn IN %s
+        """, (tuple(all_jc_names),), as_dict=1)
+        for po in po_details:
+            if po.reference_dn not in po_map: po_map[po.reference_dn] = []
+            po_map[po.reference_dn].append(po)
+
+    # 5. Assemble Data using Original Python Logic
     data = []
     for so in so_data:
         ps_names = ps_map.get(so.so_item, [])
         ps_links = "\n".join([f'<a href="#Form/Process Sheet/{n}" target="_blank">{n}</a>' for n in ps_names])
         
-        jc = jc_map.get(so.so_item, frappe._dict())
+        # Replicating get_last_jc_for_so logic sequentially in memory
+        jc_list = jc_group.get(so.so_item, [])
+        final_jc = frappe._dict()
+        final_remarks = "Not in Production"
+        
+        if jc_list:
+            for i in range(len(jc_list)):
+                current_jc = jc_list[i]
+                current_jc.remarks = ""
+                
+                if current_jc.docstatus == 1:
+                    if i == len(jc_list) - 1:
+                        current_jc.remarks += f" All Operations Completed {current_jc.total_completed_qty} Qty Ready for Dispatch"
+                        final_jc = current_jc
+                        final_remarks = current_jc.remarks
+                    else:
+                        # Subcontracting PO check
+                        if current_jc.operation in subcon_ops:
+                            linked_pos = po_map.get(current_jc.name, [])
+                            po_found_and_pending = False
+                            for po in linked_pos:
+                                if po.stock_qty > po.received_qty:
+                                    po_link = f'<a href="#Form/Purchase Order/{po.name}" target="_blank">{po.name}</a>'
+                                    current_jc.remarks += f" PO# {po_link} Pending Qty= {po.stock_qty - po.received_qty} PO Date: {po.transaction_date}"
+                                    final_jc = current_jc
+                                    final_remarks = current_jc.remarks
+                                    po_found_and_pending = True
+                                    break
+                            if po_found_and_pending:
+                                break # Returns this JC immediately
+                        final_jc = current_jc
+                        # Fallback to the original Job Card's remarks if no logic override applies
+                        final_remarks = current_jc.jc_remarks if current_jc.jc_remarks else ""
+                else:
+                    if i == 0:
+                        current_jc.remarks += "Taken into Production but First Process is Pending"
+                    else:
+                        current_jc.remarks += f" {current_jc.operation} Pending and {jc_list[i - 1].operation} Completed"
+                    final_jc = current_jc
+                    final_remarks = current_jc.remarks
+                    break # Returns this JC immediately
+
         data.append([
             so.name, so.transaction_date, so.item_code, so.description,
-            so.pend_qty, so.qty, (jc.name or ""), ps_links, (jc.status or "NO JC"),
-            (jc.operation or ""), (jc.priority or 0), (jc.for_quantity or 0),
-            (jc.qty_available or 0), (jc.remarks or "Not in Production")
+            so.pend_qty, so.qty, (final_jc.get("name", "")), ps_links, (final_jc.get("status", "NO JC")),
+            (final_jc.get("operation", "")), (final_jc.get("priority", 0)), (final_jc.get("for_quantity", 0)),
+            (final_jc.get("qty_available", 0)), final_remarks
         ])
     return data
 
